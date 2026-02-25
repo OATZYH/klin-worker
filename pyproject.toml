@@ -1,0 +1,20 @@
+[project]
+name = "klin-worker"
+version = "0.1.0"
+description = "AI File Organizer — local FastAPI backend for semantic file analysis"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiofiles>=25.1.0",
+    "fastapi>=0.133.0",
+    "ollama>=0.6.1",
+    "pydantic>=2.12.5",
+    "pydantic-settings>=2.13.1",
+    "python-multipart>=0.0.22",
+    "raganything>=1.2.9",
+    "uvicorn>=0.41.0",
+]
+
+[project.scripts]
+klin-worker = "main:main"
+
