@@ -5,6 +5,7 @@ Responsibilities:
   • Initialize RAG-Anything with local storage
   • Ingest files by absolute path (no upload)
   • Semantic search across ingested corpus
+  • Generate embeddings for text (used by ClassificationService)
   • Embedding cache support (future)
 
 RAG-Anything handles its own vector DB internally — we do NOT
@@ -30,6 +31,7 @@ class RagService:
 
     def __init__(self) -> None:
         self._rag: Any = None
+        self._embed_func: Any = None  # raw embedding callable
         self._ready: bool = False
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -64,15 +66,21 @@ class RagService:
                 working_dir=str(working_dir),
             )
 
+            # Keep a reference to the raw embed callable for embed_texts()
+            async def _embed(texts: list[str]):
+                return await ollama_embed(
+                    texts,
+                    embed_model=settings.ollama_embed_model,
+                    host=settings.ollama_host,
+                )
+
+            self._embed_func = _embed
+
             # Embedding function configured for Ollama
             embedding_func = EmbeddingFunc(
                 embedding_dim=settings.ollama_embedding_dim,
                 max_token_size=settings.ollama_max_token_size,
-                func=lambda texts: ollama_embed(
-                    texts,
-                    embed_model=settings.ollama_embed_model,
-                    host=settings.ollama_host,
-                ),
+                func=_embed,
             )
 
             self._rag = RAGAnything(
@@ -103,6 +111,18 @@ class RagService:
     @property
     def is_ready(self) -> bool:
         return self._ready
+
+    # ── Embedding ────────────────────────────────────────────────────────
+
+    async def embed_texts(self, texts: list[str]) -> Any:
+        """
+        Generate embeddings for a list of texts.
+
+        Returns a numpy-like array of shape (len(texts), embedding_dim).
+        Used by ClassificationService for category ↔ file similarity.
+        """
+        self._assert_ready()
+        return await self._embed_func(texts)
 
     # ── Ingestion ────────────────────────────────────────────────────────
 
@@ -167,8 +187,6 @@ class RagService:
         threshold = threshold or settings.similarity_threshold
         self._assert_ready()
 
-        # Placeholder: will query embedded corpus for near-duplicates
-        # once the ingestion corpus grows.
         logger.debug(
             "Duplicate check for %s (threshold=%.2f) — stub",
             file_path,

@@ -9,8 +9,17 @@ wheels/
 # Virtual environments
 .venv
 
+# OS generated files
+.DS_Store
+
 # AI
 ai/
 .agent/
 .agents/
 .claude/
+
+# env
+.env
+
+# Local dev storage (SQLite + RAG)
+.storage/

@@ -1,22 +1,38 @@
 """
 Organize API router.
 
-POST /api/organize — analyse files and return an action plan.
-No file moving, renaming, or deletion.
+POST /api/organize — the main endpoint.
+  1. Scan files for metadata
+  2. Store file records in SQLite
+  3. Ingest into RAG
+  4. Generate summary + rename suggestion
+  5. Classify against user categories
+  6. Log history
+  7. Return structured results
 """
 
 import logging
 
 from fastapi import APIRouter, Depends
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.db.models import File, FileAnalysis
+from app.db.session import get_db
 from app.models.request import OrganizeRequest
 from app.models.response import (
-    FileAnalysisResult,
+    CategoryScoreResponse,
+    FileAnalysisResponse,
+    OrganizeFileResult,
     OrganizeResponse,
-    OrganizeSummary,
+    TopCategoryResponse,
 )
+from app.services.classification_service import ClassificationService
+from app.services.history_service import HistoryService
 from app.services.rag_service import RagService
+from app.services.rename_service import RenameService
 from app.services.scanner_service import ScannerService
+from app.services.summary_service import SummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -25,98 +41,208 @@ router = APIRouter(prefix="/api", tags=["organize"])
 
 # ── Dependency Injection ─────────────────────────────────────────────────
 
-def get_scanner() -> ScannerService:
+
+def _get_scanner() -> ScannerService:
     return ScannerService()
 
 
-def get_rag() -> RagService:
-    """Injected from app state (initialised at startup)."""
+def _get_rag() -> RagService:
     from app.main import get_rag_service
 
     return get_rag_service()
 
 
+def _get_classifier(rag: RagService = Depends(_get_rag)) -> ClassificationService:
+    return ClassificationService(rag)
+
+
+def _get_summary(rag: RagService = Depends(_get_rag)) -> SummaryService:
+    return SummaryService(rag)
+
+
+def _get_rename() -> RenameService:
+    return RenameService()
+
+
+def _get_history() -> HistoryService:
+    return HistoryService()
+
+
 # ── Route ────────────────────────────────────────────────────────────────
+
 
 @router.post("/organize", response_model=OrganizeResponse)
 async def organize_files(
     body: OrganizeRequest,
-    scanner: ScannerService = Depends(get_scanner),
-    rag: RagService = Depends(get_rag),
+    db: AsyncSession = Depends(get_db),
+    scanner: ScannerService = Depends(_get_scanner),
+    rag: RagService = Depends(_get_rag),
+    classifier: ClassificationService = Depends(_get_classifier),
+    summary_svc: SummaryService = Depends(_get_summary),
+    rename_svc: RenameService = Depends(_get_rename),
+    history_svc: HistoryService = Depends(_get_history),
 ) -> OrganizeResponse:
     """
-    Analyse the given file paths and return a structured action plan.
+    Analyse and classify the given file paths.
 
-    The endpoint:
-      1. Scans each file for metadata (size, hash, extension)
-      2. Ingests valid files into RAG-Anything
-      3. Optionally checks for semantic duplicates
-      4. Returns per-file analysis + summary
+    For each file:
+      1. Scan metadata (size, hash, extension)
+      2. Upsert file record in SQLite
+      3. Ingest into RAG-Anything
+      4. Generate AI summary
+      5. Generate rename suggestion
+      6. Score against all active categories
+      7. Log history
+      8. Return structured result
 
     It does **not** move, rename, or delete any file.
     """
-    logger.info("Organize request — %d file(s)", len(body.organize))
+    logger.info("Organize request — %d file(s)", len(body.filepaths))
 
-    # Step 1: Scan all files
-    scan_results = await scanner.scan_many(body.organize)
+    results: list[OrganizeFileResult] = []
 
-    # Step 2: Process each file
-    analysis_results: list[FileAnalysisResult] = []
-    duplicates_found = 0
-    rename_suggestions = 0
-    errors = 0
+    for filepath in body.filepaths:
+        result = await _process_single_file(
+            filepath=filepath,
+            db=db,
+            scanner=scanner,
+            rag=rag,
+            classifier=classifier,
+            summary_svc=summary_svc,
+            rename_svc=rename_svc,
+            history_svc=history_svc,
+        )
+        results.append(result)
 
-    for scan in scan_results:
-        # If scan failed, short-circuit
-        if scan.error:
-            analysis_results.append(
-                FileAnalysisResult(
-                    original_path=scan.original_path,
-                    status="error",
-                    confidence=0.0,
-                    metadata=scan,
-                )
-            )
-            errors += 1
-            continue
+    return OrganizeResponse(results=results)
 
-        # Step 2a: Ingest into RAG (non-blocking for analysis)
-        ingested = False
-        if rag.is_ready:
-            ingested = await rag.ingest(scan.original_path)
 
-        # Step 2b: Duplicate check (if enabled)
-        duplicate_of = None
-        if body.rules.check_dup and rag.is_ready:
-            dups = await rag.find_duplicates(scan.original_path)
-            if dups:
-                duplicate_of = dups[0].get("path")
-                duplicates_found += 1
+# ── Per-file processing ──────────────────────────────────────────────────
 
-        # Build result
-        status = "duplicate" if duplicate_of else "ok"
-        confidence = 0.95 if ingested else 0.5
 
-        analysis_results.append(
-            FileAnalysisResult(
-                original_path=scan.original_path,
-                status=status,
-                duplicate_of=duplicate_of,
-                suggested_name=None,  # future: AI-generated name
-                suggested_category=None,  # future: semantic category
-                confidence=confidence,
-                metadata=scan,
-            )
+async def _process_single_file(
+    filepath: str,
+    db: AsyncSession,
+    scanner: ScannerService,
+    rag: RagService,
+    classifier: ClassificationService,
+    summary_svc: SummaryService,
+    rename_svc: RenameService,
+    history_svc: HistoryService,
+) -> OrganizeFileResult:
+    """Process a single file through the full AI pipeline."""
+
+    # ── Step 1: Scan ─────────────────────────────────────────────────
+    scan = await scanner.scan(filepath)
+    if scan.error:
+        return OrganizeFileResult(
+            filepath=filepath,
+            file_id="",
+            analysis=FileAnalysisResponse(),
+            categories=[],
+            error=scan.error,
         )
 
-    # Step 3: Build summary
-    scanned_ok = len(scan_results) - errors
-    summary = OrganizeSummary(
-        total_files=len(body.organize),
-        scanned_ok=scanned_ok,
-        duplicates_found=duplicates_found,
-        rename_suggestions=rename_suggestions,
-        errors=errors,
+    # ── Step 2: Upsert file record ───────────────────────────────────
+    existing = await db.execute(
+        select(File).where(File.original_path == scan.original_path)
+    )
+    file_record = existing.scalar_one_or_none()
+
+    if file_record:
+        # Update hash/size if file changed
+        file_record.hash = scan.sha256
+        file_record.size = scan.size_bytes
+        file_record.extension = scan.extension
+    else:
+        file_record = File(
+            original_path=scan.original_path,
+            hash=scan.sha256,
+            size=scan.size_bytes,
+            extension=scan.extension,
+        )
+        db.add(file_record)
+
+    await db.flush()  # assign file_record.id
+
+    # ── Step 3: Ingest into RAG ──────────────────────────────────────
+    if rag.is_ready:
+        await rag.ingest(scan.original_path)
+
+    # ── Step 4: Generate summary ─────────────────────────────────────
+    summary_text = await summary_svc.summarise(scan.original_path)
+
+    # ── Step 5: Generate rename suggestion ───────────────────────────
+    suggested_name = await rename_svc.suggest_name(
+        original_name=scan.file_name,
+        extension=scan.extension,
+        summary=summary_text,
     )
 
-    return OrganizeResponse(summary=summary, files=analysis_results)
+    # ── Step 6: Store analysis ───────────────────────────────────────
+    if file_record.analysis:
+        file_record.analysis.summary = summary_text
+        file_record.analysis.suggested_name = suggested_name
+    else:
+        analysis = FileAnalysis(
+            file_id=file_record.id,
+            summary=summary_text,
+            suggested_name=suggested_name,
+        )
+        db.add(analysis)
+
+    await db.flush()
+
+    # ── Step 7: Classify against categories ──────────────────────────
+    scores = await classifier.classify(
+        file_id=file_record.id,
+        file_path=scan.original_path,
+        db=db,
+    )
+
+    category_responses = [
+        CategoryScoreResponse(
+            category_id=s["category_id"],
+            name=s["name"],
+            score=s["score"],
+        )
+        for s in scores
+    ]
+
+    # Determine top category
+    top_category = None
+    if scores:
+        top = scores[0]
+        # Look up destination path
+        from app.db.models import Category
+
+        cat = await db.get(Category, top["category_id"])
+        top_category = TopCategoryResponse(
+            category_id=top["category_id"],
+            name=top["name"],
+            score=top["score"],
+            destination_path=cat.destination_path if cat else None,
+        )
+
+    # ── Step 8: Log history ──────────────────────────────────────────
+    await history_svc.log(
+        db=db,
+        file_id=file_record.id,
+        action="categorized",
+        metadata={
+            "top_category": top_category.name if top_category else None,
+            "confidence": top_category.score if top_category else 0.0,
+            "scores_count": len(scores),
+        },
+    )
+
+    return OrganizeFileResult(
+        filepath=scan.original_path,
+        file_id=file_record.id,
+        analysis=FileAnalysisResponse(
+            summary=summary_text,
+            suggested_name=suggested_name,
+        ),
+        categories=category_responses,
+        top_category=top_category,
+    )

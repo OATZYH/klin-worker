@@ -1,22 +1,29 @@
 """
-Klin-Worker — AI File Organizer backend.
+Klin-Worker — AI Workspace backend.
 
 FastAPI application entry point.
-  • CORS enabled for Tauri dev mode
+  • SQLite initialised at startup (lifespan)
   • RAG-Anything initialised at startup (lifespan)
+  • CORS enabled for Tauri dev mode
   • Health-check at /health
   • Organize API at /api/organize
+  • Categories CRUD at /api/categories
+  • History log at /api/history
 """
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.categories import router as categories_router
+from app.api.history import router as history_router
 from app.api.organize import router as organize_router
 from app.core.config import settings
+from app.db.migrations import run_migrations
 from app.services.rag_service import RagService
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -44,13 +51,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown lifecycle hook."""
     logger.info("🚀  Starting %s v%s", settings.app_name, settings.app_version)
 
+    # Ensure data directory exists
+    Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Initialise SQLite (create tables)
+    await run_migrations()
+
     # Initialise RAG-Anything (heavy — do it once)
     try:
         await _rag_service.setup()
     except Exception:
         logger.warning(
             "RAG-Anything failed to initialise — "
-            "the /api/organize endpoint will work without semantic features."
+            "the API will work without semantic features."
         )
 
     yield  # ← application runs here
@@ -77,6 +90,8 @@ app.add_middleware(
 
 # Routers
 app.include_router(organize_router)
+app.include_router(categories_router)
+app.include_router(history_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────

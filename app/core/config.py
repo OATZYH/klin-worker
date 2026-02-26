@@ -2,13 +2,46 @@
 Application configuration.
 
 Centralized settings using pydantic-settings for environment variable support.
-Ready to scale with similarity thresholds, background queue config, and watcher settings.
+Covers: SQLite, Ollama, RAG, security, classification, and future features.
+
+Storage path resolution:
+  - Dev  (plain Python)  → .storage/  inside the project directory
+  - Prod (PyInstaller)   → KLIN_APP_DATA_DIR env var injected by Tauri sidecar
+                           Falls back to ~/.klin if the var is not set.
 """
 
+import sys
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings
+
+
+def _resolve_default_storage_dir() -> Path:
+    """
+    Return the base storage directory depending on the runtime context.
+
+    - PyInstaller bundle  → use KLIN_APP_DATA_DIR (set by Tauri before spawning
+                            the sidecar).  Falls back to ~/.klin so the binary
+                            is still usable standalone.
+    - Plain Python (dev)  → .storage/ next to the project root (this file lives
+                            at app/core/config.py, so go up two levels).
+    """
+    if getattr(sys, "frozen", False):
+        # Running inside a PyInstaller bundle
+        import os
+        app_data = os.environ.get("KLIN_APP_DATA_DIR")
+        if app_data:
+            return Path(app_data)
+        # Fallback: next to the executable
+        return Path(sys.executable).parent / "data"
+
+    # Dev: .storage/ at the project root
+    _project_root = Path(__file__).resolve().parent.parent.parent
+    return _project_root / ".storage"
+
+
+_KLIN_DIR = _resolve_default_storage_dir()
 
 
 class Settings(BaseSettings):
@@ -16,7 +49,7 @@ class Settings(BaseSettings):
 
     # ── App ──────────────────────────────────────────────────────────────
     app_name: str = "klin-worker"
-    app_version: str = "0.1.0"
+    app_version: str = "0.2.0"
     debug: bool = False
 
     # ── Server ───────────────────────────────────────────────────────────
@@ -29,6 +62,14 @@ class Settings(BaseSettings):
         "http://localhost:5173",   # Vite fallback
         "tauri://localhost",       # Tauri production
     ]
+
+    # ── SQLite ───────────────────────────────────────────────────────────
+    database_path: str = str(_KLIN_DIR / "klin.db")
+
+    @property
+    def database_url(self) -> str:
+        """Async SQLite connection string for SQLAlchemy."""
+        return f"sqlite+aiosqlite:///{self.database_path}"
 
     # ── File System Security ─────────────────────────────────────────────
     allowed_roots: list[str] = []  # populated at runtime or via env
@@ -46,7 +87,7 @@ class Settings(BaseSettings):
     ]
 
     # ── RAG-Anything ─────────────────────────────────────────────────────
-    rag_working_dir: str = str(Path.home() / ".klin" / "rag_storage")
+    rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
     # ── Ollama (local LLM backend) ───────────────────────────────────────
     ollama_host: str = "http://localhost:11434"
@@ -56,9 +97,9 @@ class Settings(BaseSettings):
     ollama_max_token_size: int = 2048
     ollama_timeout: int = 300
 
-    # ── Semantic Duplicate Detection (future) ────────────────────────────
+    # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
-    duplicate_check_enabled: bool = True
+    classification_top_k: int = 5  # max categories returned per file
 
     # ── Background Ingestion Queue (future) ──────────────────────────────
     max_queue_size: int = 1000

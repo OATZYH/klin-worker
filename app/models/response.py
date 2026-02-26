@@ -1,10 +1,14 @@
 """
-Response models for the organize API.
+Response models for the Klin-Worker API.
 """
 
-from typing import Optional
+from datetime import datetime
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
+
+
+# ── Scanner ──────────────────────────────────────────────────────────────
 
 
 class FileScanResult(BaseModel):
@@ -19,58 +23,74 @@ class FileScanResult(BaseModel):
     error: Optional[str] = None
 
 
-class FileAnalysisResult(BaseModel):
-    """
-    Per-file analysis returned to the frontend.
-
-    The backend only *suggests* actions — it never moves, renames, or deletes.
-    """
-
-    original_path: str
-    status: str = Field(
-        description="'ok' | 'duplicate' | 'error'",
-        examples=["ok"],
-    )
-    duplicate_of: Optional[str] = Field(
-        default=None,
-        description="Path of the original file if this is a semantic duplicate.",
-    )
-    suggested_name: Optional[str] = Field(
-        default=None,
-        description="AI-suggested rename (only when allow_rename is True).",
-    )
-    suggested_category: Optional[str] = Field(
-        default=None,
-        description="Semantic category from RAG analysis.",
-    )
-    confidence: float = Field(
-        default=0.0,
-        ge=0.0,
-        le=1.0,
-        description="Confidence score of the analysis.",
-    )
-    metadata: Optional[FileScanResult] = Field(
-        default=None,
-        description="Raw scanner metadata for transparency.",
-    )
+# ── Category ─────────────────────────────────────────────────────────────
 
 
-class OrganizeSummary(BaseModel):
-    """High-level summary of the analysis run."""
+class CategoryResponse(BaseModel):
+    """Single category returned to the frontend."""
 
-    total_files: int
-    scanned_ok: int
-    duplicates_found: int
-    rename_suggestions: int
-    errors: int
+    id: str
+    name: str
+    description: str
+    color: str
+    destination_path: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class CategoryScoreResponse(BaseModel):
+    """A single category ↔ file score."""
+
+    category_id: str
+    name: str
+    score: float
+
+
+# ── Organize ─────────────────────────────────────────────────────────────
+
+
+class FileAnalysisResponse(BaseModel):
+    """AI-generated analysis of a single file."""
+
+    summary: Optional[str] = None
+    suggested_name: Optional[str] = None
+
+
+class TopCategoryResponse(BaseModel):
+    """The winning category for a file."""
+
+    category_id: str
+    name: str
+    score: float
+    destination_path: Optional[str] = None
+
+
+class OrganizeFileResult(BaseModel):
+    """Per-file result returned from POST /api/organize."""
+
+    filepath: str
+    file_id: str
+    analysis: FileAnalysisResponse
+    categories: list[CategoryScoreResponse]
+    top_category: Optional[TopCategoryResponse] = None
+    error: Optional[str] = None
 
 
 class OrganizeResponse(BaseModel):
-    """
-    Response for POST /api/organize.
+    """Response for POST /api/organize."""
 
-    Returns an action plan — no side effects on the file system.
-    """
+    results: list[OrganizeFileResult]
 
-    summary: OrganizeSummary
-    files: list[FileAnalysisResult]
+
+# ── History ──────────────────────────────────────────────────────────────
+
+
+class HistoryLogResponse(BaseModel):
+    """Single audit log entry."""
+
+    id: str
+    file_id: str
+    action: str
+    metadata: Optional[dict[str, Any]] = None
+    created_at: datetime
