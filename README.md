@@ -45,8 +45,9 @@ A single model handles both chat and embeddings — no external server needed.
 
 ```bash
 mkdir -p models
-wget -O models/gemma-3-1b-it-Q4_K_M.gguf \
-  https://huggingface.co/google/gemma-3-1b-it-GGUF/resolve/main/gemma-3-1b-it-Q4_K_M.gguf
+// Download the model and save it to `models/gemma-3-1b-it-Q4_K_M.gguf`
+// You can use any GGUF model with chat + embedding capabilities — just update the path in .env
+TBD: Add mirror links for popular models (Gemma, Mistral, Falcon)
 ```
 
 ### 2. Clone & install dependencies
