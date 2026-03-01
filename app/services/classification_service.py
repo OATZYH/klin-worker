@@ -32,14 +32,22 @@ class ClassificationService:
         file_id: str,
         file_path: str,
         db: AsyncSession,
+        summary: str | None = None,
     ) -> list[dict[str, Any]]:
         """
         Score a file against all active categories.
 
+        Args:
+            file_id:   DB id of the file record.
+            file_path: Absolute path on disk.
+            db:        Async DB session.
+            summary:   Optional AI-generated summary — when provided, it is
+                       combined with the filename for a richer file embedding.
+
         Returns a sorted list of {"category_id", "name", "score"} dicts.
         """
         # 1. Get file embedding
-        file_embedding = await self._get_file_embedding(file_path)
+        file_embedding = await self._get_file_embedding(file_path, summary=summary)
         if file_embedding is None:
             logger.warning("No embedding for %s — skipping classification", file_path)
             return []
@@ -100,18 +108,30 @@ class ClassificationService:
             logger.error("Category embedding failed: %s", exc)
         return None
 
-    async def _get_file_embedding(self, file_path: str) -> list[float] | None:
-        """Get the embedding vector for a file's content."""
+    async def _get_file_embedding(
+        self,
+        file_path: str,
+        summary: str | None = None,
+    ) -> list[float] | None:
+        """
+        Get the embedding vector for a file.
+
+        When an AI summary is available we embed
+        ``"<filename> <extension>. <summary>"`` which captures the actual
+        content semantics rather than just the filename.
+        """
         if not self._rag.is_ready:
             return None
 
         try:
-            # Use file name + extension as a lightweight text proxy.
-            # When RAG ingestion is complete, we can query the stored embeddings.
             from pathlib import Path
 
             p = Path(file_path)
-            query_text = f"{p.stem} {p.suffix}"
+            if summary:
+                query_text = f"{p.stem} {p.suffix}. {summary}"
+            else:
+                # Fallback: filename only (lightweight proxy)
+                query_text = f"{p.stem} {p.suffix}"
 
             vectors = await self._rag.embed_texts([query_text])
             if vectors is not None and len(vectors) > 0:
@@ -142,6 +162,13 @@ class ClassificationService:
         db: AsyncSession,
     ) -> None:
         """Upsert classification scores for a file."""
+        # Delete stale scores from previous runs
+        from sqlmodel import delete
+
+        await db.execute(
+            delete(CategoryScore).where(CategoryScore.file_id == file_id)
+        )
+
         for s in scores:
             db.add(
                 CategoryScore(

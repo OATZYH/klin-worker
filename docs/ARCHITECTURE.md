@@ -17,7 +17,7 @@
   - [SummaryService](#summaryservice)
   - [RenameService](#renameservice)
   - [HistoryService](#historyservice)
-- [LLM Integration (Ollama)](#llm-integration-ollama)
+- [LLM Integration (llama-cpp-python)](#llm-integration-llama-cpp-python)
 - [Data Models](#data-models)
 - [Security Model](#security-model)
 - [Configuration System](#configuration-system)
@@ -47,14 +47,14 @@ The core principle is **privacy-first**: all file processing, LLM inference, emb
      ┌─────┼──────────┬──────────────────┐
      ▼     ▼          ▼                  ▼
 ┌────────┐ ┌────────┐ ┌──────────────┐ ┌────────────────┐
-│ Local  │ │ SQLite │ │ RAG-Anything │ │    Ollama      │
-│ Files  │ │ ~/.klin│ │  (LightRAG)  │ │ localhost:11434│
-│ (R/O)  │ │/klin.db│ └──────┬───────┘ └───────┬────────┘
-│        │ └────────┘        │                 │
-│        │                   ▼                 │
-│        │            ┌────────────┐           │
-│        │            │ ~/.klin/   │           │
-│        │            │ rag_storage│   ◄───────┘
+│ Local  │ │ SQLite │ │ RAG-Anything │ │ llama-cpp-python │
+│ Files  │ │ ~/.klin│ │  (LightRAG)  │ │ (in-process GGUF)│
+│ (R/O)  │ │/klin.db│ └──────┬───────┘ └────────┬─────────┘
+│        │ └────────┘        │                  │
+│        │                   ▼                  │
+│        │            ┌────────────┐            │
+│        │            │ ~/.klin/   │            │
+│        │            │ rag_storage│   ◄────────┘
 │        │            └────────────┘  embeddings + graph
 └────────┘
 ```
@@ -62,7 +62,7 @@ The core principle is **privacy-first**: all file processing, LLM inference, emb
 **Key constraints:**
 
 - ❌ No file uploads — only absolute paths
-- ❌ No cloud APIs — Ollama runs locally
+- ❌ No cloud APIs — llama-cpp-python runs in-process
 - ❌ No file mutation — read-only analysis
 - ✅ All data stays on the user's machine
 - ✅ Persistent user categories in SQLite
@@ -89,7 +89,10 @@ app/main.py
   │     ├── app/services/history_service.py
   │     └── app/services/rag_service.py
   ├── app/api/categories.py           (Router — CRUD /api/categories)
-  └── app/api/history.py              (Router — GET /api/history)
+  │     └── app/services/seed_service.py  (← _build_embed_text shared)
+  ├── app/api/history.py              (Router — GET /api/history)
+  ├── app/services/seed_service.py    (Startup — seeds 12 default categories)
+  └── app/services/startup_checks.py  (Startup — verifies DB, llama-cpp-python, RAG)
 ```
 
 ### Layer Separation
@@ -177,10 +180,10 @@ Client sends:
      │   └── RAGAnything.process_document_complete()
      │
      ├── SummaryService.summarise(path)
-     │   └── Ollama LLM → one-paragraph summary
+     │   └── llama-cpp-python → one-paragraph summary
      │
      ├── RenameService.suggest_name(name, ext, summary)
-     │   └── Ollama LLM → descriptive filename
+     │   └── llama-cpp-python → descriptive filename
      │
      ├── Store FileAnalysis in SQLite
      │
@@ -335,7 +338,7 @@ vectors used by ClassificationService.
 
 | Method | Description |
 |---|---|
-| `setup()` | One-time init. Connects RAG-Anything → LightRAG → Ollama |
+| `setup()` | One-time init. Connects RAG-Anything → LightRAG → llama-cpp-python |
 | `embed_texts(texts)` | Generate embedding vectors for arbitrary text |
 | `ingest(file_path)` | Parse + embed a file into the knowledge graph |
 | `semantic_search(query)` | Query the corpus for semantically similar content |
@@ -367,7 +370,7 @@ category descriptions when they are created or updated.
 
 **File:** `app/services/summary_service.py`  
 **Pattern:** Per-request, wraps RagService  
-**Responsibility:** Generate one-paragraph file summaries via Ollama LLM
+**Responsibility:** Generate one-paragraph file summaries via llama-cpp-python
 
 ---
 
@@ -375,7 +378,7 @@ category descriptions when they are created or updated.
 
 **File:** `app/services/rename_service.py`  
 **Pattern:** Per-request, stateless  
-**Responsibility:** Generate descriptive filename suggestions via Ollama LLM
+**Responsibility:** Generate descriptive filename suggestions via llama-cpp-python
 
 ---
 
@@ -387,26 +390,50 @@ category descriptions when they are created or updated.
 
 ---
 
-## LLM Integration (Ollama)
+### SeedService
 
-### Connection Architecture
+**File:** `app/services/seed_service.py`  
+**Pattern:** Run-once at startup (idempotent)  
+**Responsibility:** Insert 12 default categories with rich keywords (EN + TH) on first boot. Also provides `generate_missing_embeddings()` and `_build_embed_text()` shared by the categories router.
+
+---
+
+### StartupChecks
+
+**File:** `app/services/startup_checks.py`  
+**Pattern:** Run-once at startup, results cached for `/health`  
+**Responsibility:** Diagnostic checks for Database (SQLite connectivity + schema), llama-cpp-python (model loaded in-process), and RAG-Anything (initialised). Logs a summary table and exposes results via the `/health` endpoint.
+
+---
+
+## LLM Integration (llama-cpp-python)
+
+### In-Process Architecture
+
+The GGUF model is loaded directly into the FastAPI process via `llama-cpp-python`.
+No external server is required — all inference happens in-process.
 
 ```
-┌─────────────────┐     ┌───────────┐     ┌──────────────┐
-│ RagService      │ ──► │ LightRAG  │ ──► │   Ollama     │
-│ SummaryService  │ ──► │           │     │ :11434       │
-│ RenameService   │ ──► │ llm_func  │────►│ gemma3:1b    │
-│ Classification  │     │ embed_func│────►│ embedding    │
-│   Service       │     │           │     │ gemma:300m   │
-└─────────────────┘     └───────────┘     └──────────────┘
+┌─────────────────┐     ┌───────────┐     ┌──────────────────┐
+│ RagService      │ ──► │ LightRAG  │     │  llama-cpp-python│
+│ SummaryService  │ ──► │           │ ──► │  (in-process)    │
+│ RenameService   │ ──► │ llm_func  │────►│  gemma-3-1b-it   │
+│ Classification  │     │ embed_func│────►│  Q4_K_M.gguf     │
+│   Service       │     └───────────┘     └──────────────────┘
+└─────────────────┘           │
+                              ▼
+                     ┌────────────────┐
+                     │   LlmClient    │  ← singleton, loaded once at startup
+                     │  (llm_client)  │
+                     └────────────────┘
 ```
 
-### What Each Model Does
+### Model Capabilities
 
-| Model | Role | Used For |
+| Capability | Method | Used For |
 |---|---|---|
-| `gemma3:1b` | LLM (chat/completion) | Entity extraction, summarisation, rename suggestions, RAG query answering |
-| `embeddinggemma:300m` | Embedding (768-dim) | File content vectors, category description vectors, cosine similarity |
+| Chat completion | `LlmClient.achat()` | Entity extraction, summarisation, rename suggestions, RAG query answering |
+| Embedding | `LlmClient.aembed()` | File content vectors, category description vectors, cosine similarity |
 
 ---
 
@@ -496,6 +523,11 @@ Imported by all services
 | Variable | Default | Description |
 |---|---|---|
 | `KLIN_DATABASE_PATH` | `~/.klin/klin.db` | SQLite database file path |
+| `KLIN_LLAMACPP_MODEL_PATH` | `models/gemma-3-1b-it-Q4_K_M.gguf` | Path to GGUF model file |
+| `KLIN_LLAMACPP_N_CTX` | `2048` | Context window size |
+| `KLIN_LLAMACPP_N_GPU_LAYERS` | `0` | GPU layers (-1 = offload all) |
+| `KLIN_LLAMACPP_EMBEDDING_DIM` | `2048` | Embedding vector dimension |
+| `KLIN_LLAMACPP_MAX_TOKEN_SIZE` | `2048` | Max tokens for generation |
 | `KLIN_CLASSIFICATION_TOP_K` | `5` | Max categories returned per file |
 
 ---
@@ -606,7 +638,7 @@ to suggest destination folders
 | Service | Address | Protocol |
 |---|---|---|
 | Klin-Worker API | `127.0.0.1:8000` | HTTP |
-| Ollama | `127.0.0.1:11434` | HTTP |
+| llama-cpp-python | in-process | N/A (loaded in FastAPI process) |
 | Tauri → Worker | `localhost:8000` | HTTP (CORS-enabled) |
 
 All traffic is **localhost only**. Nothing is exposed to the network.

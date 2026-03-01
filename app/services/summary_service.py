@@ -1,16 +1,15 @@
 """
 Summary Service — AI-generated file summaries.
 
-Asks the local LLM (via Ollama) to produce a concise one-paragraph
-summary of a file based on its content retrieved from the RAG engine.
+Asks the local LLM (via llama-cpp-python, in-process) to produce a concise
+one-paragraph summary of a file based on its content retrieved from the RAG engine.
 """
 
 import logging
 from typing import Any
 
-import ollama as ollama_client
-
 from app.core.config import settings
+from app.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +51,7 @@ class SummaryService:
             p = Path(file_path)
             context = f"Filename: {p.name}, Extension: {p.suffix}, Size: file on disk"
 
-        # 2. Ask LLM
+        # 2. Ask LLM via llama-cpp-python (in-process)
         prompt = (
             "You are a file analysis assistant. "
             "Write a concise one-paragraph summary (2-4 sentences) of the following file content. "
@@ -64,15 +63,12 @@ class SummaryService:
         )
 
         try:
-            response = ollama_client.chat(
-                model=settings.ollama_llm_model,
+            content = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
-                options={
-                    "num_ctx": settings.ollama_max_token_size,
-                    "temperature": 0.3,
-                },
+                temperature=0.3,
+                max_tokens=settings.max_token_size,
             )
-            return response.message.content.strip() or None
+            return content.strip() or None
         except Exception as exc:
             logger.error("Summary generation failed for %s: %s", file_path, exc)
             return None

@@ -1,16 +1,15 @@
 """
 Rename Service — AI-generated file name suggestions.
 
-Asks the local LLM (via Ollama) to propose a descriptive filename
-based on the file extension and AI-generated summary.
+Asks the local LLM (via llama-cpp-python, in-process) to propose a
+descriptive filename based on the file extension and AI-generated summary.
 """
 
 import logging
 import re
 
-import ollama as ollama_client
-
 from app.core.config import settings
+from app.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +42,11 @@ class RenameService:
         )
 
         try:
-            response = ollama_client.chat(
-                model=settings.ollama_llm_model,
+            raw = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
-                options={
-                    "num_ctx": settings.ollama_max_token_size,
-                    "temperature": 0.3,
-                },
+                temperature=0.3,
+                max_tokens=settings.max_token_size,
             )
-            raw = response.message.content.strip()
             # Sanitise: keep only alphanumerics, underscores, hyphens
             clean = re.sub(r"[^\w\-]", "_", raw).strip("_")
             if clean:

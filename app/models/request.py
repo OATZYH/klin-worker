@@ -32,6 +32,10 @@ class CategoryCreate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
+    keywords_text: str | None = Field(
+        default=None,
+        description="Semantic keywords blob (EN + TH) for embedding generation.",
+    )
     color: str = Field(default="#6366f1", pattern=r"^#[0-9a-fA-F]{6}$")
     destination_path: str | None = Field(
         default=None,
@@ -44,6 +48,10 @@ class CategoryUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
     description: str | None = Field(default=None, max_length=500)
+    keywords_text: str | None = Field(
+        default=None,
+        description="Semantic keywords blob (EN + TH) for embedding generation.",
+    )
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     destination_path: str | None = None
     is_active: bool | None = None

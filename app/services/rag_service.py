@@ -10,13 +10,18 @@ Responsibilities:
 
 RAG-Anything handles its own vector DB internally — we do NOT
 manage a separate vector store.
+
+LLM backend: llama-cpp-python (in-process GGUF model).
 """
 
 import logging
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
+
 from app.core.config import settings
+from app.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +43,13 @@ class RagService:
 
     async def setup(self) -> None:
         """
-        Lazy-initialise the RAG-Anything engine with Ollama as LLM backend.
+        Lazy-initialise the RAG-Anything engine with llama-cpp-python as LLM backend.
 
         Connection chain:
-          RAGAnything  →  LightRAG  →  Ollama (local)
+          RAGAnything  →  LightRAG  →  llama-cpp-python (in-process)
 
-        Ollama must be running at `settings.ollama_host` with the configured
-        models already pulled:
-          • LLM:       ollama pull <ollama_llm_model>
-          • Embedding: ollama pull <ollama_embed_model>
+        The GGUF model must already be loaded via `llm_client.startup()`
+        before calling this method.
 
         Called once at application startup (lifespan event).
         """
@@ -54,7 +57,6 @@ class RagService:
             return
 
         try:
-            from lightrag.llm.ollama import ollama_model_complete, ollama_embed
             from lightrag.utils import EmbeddingFunc
             from raganything import RAGAnything
             from raganything.config import RAGAnythingConfig
@@ -67,42 +69,40 @@ class RagService:
             )
 
             # Keep a reference to the raw embed callable for embed_texts()
-            async def _embed(texts: list[str]):
-                return await ollama_embed(
-                    texts,
-                    embed_model=settings.ollama_embed_model,
-                    host=settings.ollama_host,
-                )
+            async def _embed(texts: list[str]) -> np.ndarray:
+                vectors = await llm_client.aembed(texts)
+                return np.array(vectors, dtype=np.float32)
 
             self._embed_func = _embed
 
-            # Embedding function configured for Ollama
+            # Embedding function configured for llama-cpp-python
             embedding_func = EmbeddingFunc(
-                embedding_dim=settings.ollama_embedding_dim,
-                max_token_size=settings.ollama_max_token_size,
+                embedding_dim=settings.embedding_dim,
+                max_token_size=settings.max_token_size,
                 func=_embed,
             )
 
+            # LLM completion function via in-process model
+            async def _llm_complete(prompt, system_prompt=None, history_messages=None, **kwargs):
+                messages: list[dict[str, str]] = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                if history_messages:
+                    messages.extend(history_messages)
+                messages.append({"role": "user", "content": prompt})
+                return await llm_client.achat(messages)
+
             self._rag = RAGAnything(
                 config=config,
-                llm_model_func=ollama_model_complete,
+                llm_model_func=_llm_complete,
                 embedding_func=embedding_func,
-                lightrag_kwargs={
-                    "llm_model_name": settings.ollama_llm_model,
-                    "llm_model_kwargs": {
-                        "host": settings.ollama_host,
-                        "timeout": settings.ollama_timeout,
-                        "options": {"num_ctx": settings.ollama_max_token_size},
-                    },
-                },
             )
             self._ready = True
             logger.info(
-                "RAG-Anything initialised  →  %s  (LLM: %s, Embed: %s @ %s)",
+                "RAG-Anything initialised  →  %s  (model: %s, embd_dim: %d)",
                 working_dir,
-                settings.ollama_llm_model,
-                settings.ollama_embed_model,
-                settings.ollama_host,
+                settings.model_path,
+                settings.embedding_dim,
             )
         except Exception as exc:
             logger.error("Failed to initialise RAG-Anything: %s", exc)

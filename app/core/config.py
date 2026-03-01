@@ -2,7 +2,7 @@
 Application configuration.
 
 Centralized settings using pydantic-settings for environment variable support.
-Covers: SQLite, Ollama, RAG, security, classification, and future features.
+Covers: SQLite, llama.cpp, RAG, security, classification, and future features.
 
 Storage path resolution:
   - Dev  (plain Python)  → .storage/  inside the project directory
@@ -10,11 +10,14 @@ Storage path resolution:
                            Falls back to ~/.klin if the var is not set.
 """
 
+import logging
 import sys
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_default_storage_dir() -> Path:
@@ -89,13 +92,15 @@ class Settings(BaseSettings):
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
-    # ── Ollama (local LLM backend) ───────────────────────────────────────
-    ollama_host: str = "http://localhost:11434"
-    ollama_llm_model: str = "gemma3:1b"
-    ollama_embed_model: str = "embeddinggemma:300m"
-    ollama_embedding_dim: int = 768
-    ollama_max_token_size: int = 2048
-    ollama_timeout: int = 300
+    # ── llama-cpp-python (in-process GGUF model) ───────────────────────
+    llamacpp_model_path: str = "models/gemma-3-1b-it-Q4_K_M.gguf"
+    llamacpp_n_ctx: int = 2048
+    llamacpp_n_gpu_layers: int = 0           # -1 = offload all layers to GPU
+    llamacpp_n_batch: int = 512
+    llamacpp_n_threads: Optional[int] = None  # None = auto-detect
+    llamacpp_embedding_dim: int = 2048        # model-native embedding dim
+    llamacpp_max_token_size: int = 2048
+    llamacpp_verbose: bool = False
 
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
@@ -118,6 +123,20 @@ class Settings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
     }
+
+    # ── Resolved accessors ─────────────────────────────────────────────
+
+    @property
+    def model_path(self) -> str:
+        return self.llamacpp_model_path
+
+    @property
+    def embedding_dim(self) -> int:
+        return self.llamacpp_embedding_dim
+
+    @property
+    def max_token_size(self) -> int:
+        return self.llamacpp_max_token_size
 
 
 # Singleton – import this everywhere

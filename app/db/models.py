@@ -33,9 +33,11 @@ class Category(SQLModel, table=True):
     id: str = Field(default_factory=_new_uuid, primary_key=True)
     name: str = Field(nullable=False, unique=True)
     description: str = Field(default="", nullable=False)
+    keywords_text: Optional[str] = Field(default=None)  # Full text blob of semantic keywords
     color: str = Field(default="#6366f1", max_length=7, nullable=False)
     destination_path: Optional[str] = Field(default=None)
     embedding: Optional[str] = Field(default=None)  # JSON-serialised float list
+    is_default: bool = Field(default=False, nullable=False)  # Seeded by system
     is_active: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)

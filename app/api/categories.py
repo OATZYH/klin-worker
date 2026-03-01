@@ -19,6 +19,7 @@ from app.models.request import CategoryCreate, CategoryUpdate
 from app.models.response import CategoryResponse
 from app.services.classification_service import ClassificationService
 from app.services.rag_service import RagService
+from app.services.seed_service import _build_embed_text
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,10 @@ def _to_response(cat: Category) -> CategoryResponse:
         id=cat.id,
         name=cat.name,
         description=cat.description,
+        keywords_text=cat.keywords_text,
         color=cat.color,
         destination_path=cat.destination_path,
+        is_default=cat.is_default,
         is_active=cat.is_active,
         created_at=cat.created_at,
         updated_at=cat.updated_at,
@@ -82,20 +85,21 @@ async def create_category(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Category '{body.name}' already exists.")
 
-    # Generate embedding from description
+    # Generate embedding from name + description + keywords
     embedding = None
-    embed_text = f"{body.name}. {body.description}" if body.description else body.name
+    cat = Category(
+        name=body.name,
+        description=body.description,
+        keywords_text=body.keywords_text,
+        color=body.color,
+        destination_path=body.destination_path,
+    )
+    embed_text = _build_embed_text(cat)
     embedding_vec = await classifier.generate_category_embedding(embed_text)
     if embedding_vec:
         embedding = json.dumps(embedding_vec)
 
-    cat = Category(
-        name=body.name,
-        description=body.description,
-        color=body.color,
-        destination_path=body.destination_path,
-        embedding=embedding,
-    )
+    cat.embedding = embedding
     db.add(cat)
     await db.flush()
 
@@ -136,12 +140,12 @@ async def update_category(
 
     for field, value in update_data.items():
         setattr(cat, field, value)
-        if field in ("name", "description"):
+        if field in ("name", "description", "keywords_text"):
             need_re_embed = True
 
     # Regenerate embedding when text changes
     if need_re_embed:
-        embed_text = f"{cat.name}. {cat.description}" if cat.description else cat.name
+        embed_text = _build_embed_text(cat)
         embedding_vec = await classifier.generate_category_embedding(embed_text)
         if embedding_vec:
             cat.embedding = json.dumps(embedding_vec)

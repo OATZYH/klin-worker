@@ -32,8 +32,10 @@ class CategoryResponse(BaseModel):
     id: str
     name: str
     description: str
+    keywords_text: Optional[str] = None
     color: str
     destination_path: Optional[str] = None
+    is_default: bool = False
     is_active: bool
     created_at: datetime
     updated_at: datetime

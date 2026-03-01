@@ -1,0 +1,16 @@
+meta {
+  name: List History
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/history
+  body: none
+  auth: none
+}
+
+params:query {
+  limit: 100
+  ~action: organized
+}

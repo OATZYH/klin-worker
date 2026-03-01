@@ -1,0 +1,25 @@
+meta {
+  name: Update Category
+  type: http
+  seq: 4
+}
+
+patch {
+  url: {{baseUrl}}/api/categories/{{categoryId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "name": "Updated Category Name",
+    "description": "Updated description for the category",
+    "keywords_text": "updated keywords here",
+    "color": "#f43f5e",
+    "is_active": true
+  }
+}

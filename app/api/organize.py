@@ -198,6 +198,7 @@ async def _process_single_file(
         file_id=file_record.id,
         file_path=scan.original_path,
         db=db,
+        summary=summary_text,
     )
 
     category_responses = [
@@ -228,11 +229,19 @@ async def _process_single_file(
     await history_svc.log(
         db=db,
         file_id=file_record.id,
-        action="categorized",
+        action="organized",
         metadata={
             "top_category": top_category.name if top_category else None,
-            "confidence": top_category.score if top_category else 0.0,
-            "scores_count": len(scores),
+            "top_score": top_category.score if top_category else 0.0,
+            "suggested_name": suggested_name,
+            "all_scores": [
+                {
+                    "category_id": s["category_id"],
+                    "name": s["name"],
+                    "score": s["score"],
+                }
+                for s in scores
+            ],
         },
     )
 

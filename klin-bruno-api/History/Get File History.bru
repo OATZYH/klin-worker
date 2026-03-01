@@ -1,0 +1,15 @@
+meta {
+  name: Get File History
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/api/history/file/{{fileId}}
+  body: none
+  auth: none
+}
+
+params:query {
+  limit: 50
+}
