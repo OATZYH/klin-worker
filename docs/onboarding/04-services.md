@@ -114,7 +114,7 @@ async def classify(self, file_id, file_path, db, summary=None) -> list[dict]:
 def _build_embed_text(cat):
     return ". ".join([cat.name, cat.description, cat.keywords_text])
 
-# In categories.py router:
+# In settings/categories.py router:
 embed_text = _build_embed_text(cat)
 embedding_vec = await classifier.generate_category_embedding(embed_text)
 cat.embedding = json.dumps(embedding_vec)  # Stored as JSON string in DB
@@ -160,7 +160,9 @@ async def suggest_name(self, original_name, extension, summary) -> str | None:
 
 ## `seed_service.py` — Default Category Seeding
 
-Seeds 12 predefined categories on first boot and generates their embeddings.
+Seeds 12 predefined categories and generates their embeddings.  
+**Called by `PUT /api/settings/initial-base-path`** (not at startup) so the
+Tauri frontend can supply the OS-specific base path first.
 
 ```python
 # 12 default categories with rich semantic keywords (EN + TH):

@@ -12,6 +12,12 @@ All primary keys are **UUID v4** strings. Timestamps are **UTC ISO-8601**.
 
 ```mermaid
 erDiagram
+    app_settings {
+        String key PK
+        Text value "NULLABLE"
+        DateTime updated_at "NOT NULL, UTC"
+    }
+
     categories {
         String id PK
         Text name UK "NOT NULL"
@@ -19,6 +25,7 @@ erDiagram
         Text keywords_text "NULLABLE, semantic keywords EN+TH"
         String color "NOT NULL, #6366f1"
         Text destination_path "NULLABLE"
+        Boolean is_path_manual "NOT NULL, false"
         Text embedding "NULLABLE, JSON float[]"
         Boolean is_default "NOT NULL, false"
         Boolean is_active "NOT NULL, true"
@@ -67,6 +74,14 @@ erDiagram
 ### ASCII
 
 ```
+┌──────────────────┐
+│  app_settings    │
+├──────────────────┤
+│ key (PK)         │
+│ value            │
+│ updated_at       │
+└──────────────────┘
+
 ┌──────────────┐       ┌─────────────────┐       ┌──────────────────┐
 │  categories  │       │      files      │       │  file_analysis   │
 ├──────────────┤       ├─────────────────┤       ├──────────────────┤
@@ -76,9 +91,10 @@ erDiagram
 │ keywords_text│       │ size            │       │ suggested_name   │
 │ color        │       │ extension       │       │ processed_at     │
 │ dest_path    │       │ created_at      │       └──────────────────┘
-│ embedding    │       └────────┬────────┘
-│ is_default   │                │
-│ is_active    │                │ 1:N
+│ is_path_manual│      └────────┬────────┘
+│ embedding    │                │
+│ is_default   │                │ 1:N
+│ is_active    │                │
 │ created_at   │                │
 │ updated_at   │                │
 └───────┬──────┘                │
@@ -104,6 +120,24 @@ erDiagram
 
 ## Tables
 
+### `app_settings`
+
+Key-value store for application-wide settings (e.g. default base path).
+
+| Column       | Type       | Constraints | Default | Description                          |
+| ------------ | ---------- | ----------- | ------- | ------------------------------------ |
+| `key`        | `String`   | **PK**      | —       | Setting identifier                   |
+| `value`      | `Text`     | NULLABLE    | `NULL`  | Setting value                        |
+| `updated_at` | `DateTime` | NOT NULL    | UTC now | Last modification timestamp          |
+
+**Known keys:**
+
+| Key                  | Example value              | Description                                        |
+| -------------------- | -------------------------- | -------------------------------------------------- |
+| `default_base_path`  | `/Users/sarun/KlinFiles`   | Base folder. Auto-applied to categories where `is_path_manual=false`. |
+
+---
+
 ### `categories`
 
 User-defined classification buckets. Each category has an embedding vector used for cosine-similarity scoring against files.
@@ -115,7 +149,8 @@ User-defined classification buckets. Each category has an embedding vector used 
 | `description`      | `Text`       | NOT NULL                | `""`             | Human description used for embedding          |
 | `keywords_text`    | `Text`       | NULLABLE                | `NULL`           | Semantic keywords blob (EN + TH + doc hints). Combined with name + description for richer embeddings. |
 | `color`            | `String(7)`  | NOT NULL                | `"#6366f1"`      | Hex color for UI display                     |
-| `destination_path` | `Text`       | NULLABLE                | `NULL`           | Optional target folder for organized files   |
+| `destination_path` | `Text`       | NULLABLE                | `NULL`           | Target folder for organized files. Auto-set from `default_base_path/{name}` unless manual. |
+| `is_path_manual`   | `Boolean`    | NOT NULL                | `false`          | `true` when user explicitly set `destination_path`. Auto-update from base path is skipped. |
 | `embedding`        | `Text`       | NULLABLE                | `NULL`           | JSON-serialised float list (768-dim vector)  |
 | `is_default`       | `Boolean`    | NOT NULL                | `false`          | `true` for system-seeded categories (12 defaults). User-created categories are `false`. |
 | `is_active`        | `Boolean`    | NOT NULL                | `true`           | Soft-delete / disable toggle                 |
@@ -128,7 +163,7 @@ The embedding vector is generated from `"{name}. {description}. {keywords_text}"
 
 **Default categories:**
 
-12 categories are seeded on first boot via `seed_service.py` (idempotent — seeds when the categories table is empty OR when no `is_default=True` rows exist). Embeddings for seeded categories are generated immediately after RAG initialises, but only if llama.cpp is reachable (verified by `startup_checks.py`).
+12 categories are seeded via `PUT /api/settings/initial-base-path` (called by Tauri on first launch) using `seed_service.py` (idempotent — seeds when the categories table is empty OR when no `is_default=True` rows exist). Embeddings are generated in the same request if llama.cpp and RAG are ready.
 
 **Relationships:**
 

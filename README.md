@@ -74,7 +74,7 @@ uv run uvicorn app.main:app --reload
 The server starts at `http://127.0.0.1:8000`. On first boot it will:
 - Run database migrations (creates `.storage/klin.db`)
 - Load the GGUF model into memory
-- Seed 12 default file categories with embeddings
+- Wait for `PUT /api/settings/initial-base-path` (called by Tauri) to seed 12 default categories with folder paths and embeddings
 
 ### 5. Verify
 
@@ -86,7 +86,7 @@ curl http://127.0.0.1:8000/health
 # {"status":"ok","version":"0.2.0","rag_ready":true}
 
 # List auto-seeded categories
-curl http://127.0.0.1:8000/api/categories
+curl http://127.0.0.1:8000/api/settings/categories
 ```
 
 ---
@@ -123,7 +123,11 @@ klin-worker/
 │   ├── main.py                          # FastAPI app, CORS, lifespan
 │   ├── api/
 │   │   ├── organize.py                  # POST /api/organize
-│   │   ├── categories.py               # CRUD /api/categories
+│   │   ├── settings/                    # Settings sub-routers
+│   │   │   ├── __init__.py              # Combines routers under /api/settings
+│   │   │   ├── categories.py            # CRUD /api/settings/categories
+│   │   │   ├── base_path.py             # GET/PUT /api/settings/default-base-path
+│   │   │   └── init_base_path.py        # PUT /api/settings/initial-base-path
 │   │   └── history.py                   # GET /api/history
 │   ├── services/
 │   │   ├── llm_client.py               # llama-cpp-python singleton wrapper

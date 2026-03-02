@@ -35,6 +35,7 @@ class CategoryResponse(BaseModel):
     keywords_text: Optional[str] = None
     color: str
     destination_path: Optional[str] = None
+    is_path_manual: bool = False
     is_default: bool = False
     is_active: bool
     created_at: datetime
@@ -96,3 +97,22 @@ class HistoryLogResponse(BaseModel):
     action: str
     metadata: Optional[dict[str, Any]] = None
     created_at: datetime
+
+
+# ── Settings ────────────────────────────────────────────────────────────
+
+
+class DefaultBasePathResponse(BaseModel):
+    """Response for default base path setting."""
+
+    default_base_path: Optional[str] = None
+    updated_count: int = 0
+    updated_categories: list[CategoryResponse] = []
+
+
+class InitialBasePathResponse(BaseModel):
+    """Response for PUT /api/settings/initial-base-path."""
+
+    default_base_path: str
+    categories_seeded: bool = False
+    categories: list[CategoryResponse] = []

@@ -26,14 +26,14 @@ This is the **heart** of the application. It does:
        await run_migrations()                           # Create/update DB tables
        await _rag_service.setup()                       # Initialize RAG-Anything + llama-cpp-python
        _startup_checks = await run_all_checks(db, rag)  # ← Check DB, llama-cpp-python, RAG
-       await seed_default_categories(db)                # Seed 12 default categories
-       if llamacpp_ok:
-           await generate_missing_embeddings(db, cls)   # Embed all categories
+       # NOTE: Category seeding is NOT done here.
+       # Tauri calls PUT /api/settings/initial-base-path after startup,
+       # which sets the OS-specific base path AND seeds default categories.
        yield                                            # ← App runs here
        # ON SHUTDOWN: (cleanup would go here)
    ```
 4. **Creates the FastAPI app** with CORS middleware (allows Tauri frontend to connect)
-5. **Registers 3 routers**: organize, categories, history
+5. **Registers routers**: organize, settings (categories + base path), history
 6. **Health check endpoint** at `/health` — returns service status for each checked system:
    ```json
    {

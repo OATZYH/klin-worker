@@ -26,17 +26,40 @@ Each file goes through `_process_single_file()` — see [Organize Pipeline](./06
 
 ---
 
-## `app/api/categories.py` — CRUD for Categories
+## `app/api/settings/` — Settings & Categories
+
+All configuration-related endpoints are grouped under `/api/settings`.
+The folder structure:
+
+```
+app/api/settings/
+├── __init__.py          ← Combines sub-routers under /api/settings
+├── categories.py      ← CRUD for classification categories
+└── base_path.py       ← Default base path setting
+```
+
+### Categories — `/api/settings/categories`
 
 | Endpoint | Method | What it does |
 |---|---|---|
-| `GET /api/categories` | GET | List categories (active only by default) |
-| `POST /api/categories` | POST | Create category + generate embedding |
-| `GET /api/categories/{id}` | GET | Get one category |
-| `PATCH /api/categories/{id}` | PATCH | Update category (re-embeds if name/description changes) |
-| `DELETE /api/categories/{id}` | DELETE | Delete category |
+| `/api/settings/categories` | GET | List categories (active only by default) |
+| `/api/settings/categories` | POST | Create category + generate embedding |
+| `/api/settings/categories/{id}` | GET | Get one category |
+| `/api/settings/categories/{id}` | PATCH | Update category (re-embeds if name/description changes) |
+| `/api/settings/categories/{id}` | DELETE | Delete category |
 
 **Key behavior:** When you create/update a category, the embedding is auto-generated from `"{name}. {description}. {keywords_text}"` and stored as JSON in the `embedding` column. Changing `name`, `description`, or `keywords_text` triggers automatic re-embedding.
+
+**Manual path flag:** Setting `destination_path` via PATCH marks `is_path_manual=true` — that category is excluded from auto-updates when the default base path changes.
+
+### Default Base Path — `/api/settings/default-base-path`
+
+| Endpoint | Method | What it does |
+|---|---|---|
+| `/api/settings/default-base-path` | GET | Get current default base path |
+| `/api/settings/default-base-path` | PUT | Set base path + auto-update non-manual categories |
+
+**Key behavior:** When the base path is set to e.g. `/Users/you/KlinFiles`, every category where `is_path_manual=false` gets its `destination_path` auto-updated to `/Users/you/KlinFiles/{category.name}`.
 
 ---
 

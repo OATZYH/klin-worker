@@ -55,3 +55,32 @@ class CategoryUpdate(BaseModel):
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     destination_path: str | None = None
     is_active: bool | None = None
+
+
+# ── Settings ───────────────────────────────────────────────────────────
+
+
+class DefaultBasePathUpdate(BaseModel):
+    """PUT /api/settings/default-base-path request body."""
+
+    default_base_path: str = Field(
+        ...,
+        min_length=1,
+        description="Absolute path to the default folder for category sub-folders.",
+        examples=["/Users/sarun/KlinFiles"],
+    )
+
+
+class InitialBasePathRequest(BaseModel):
+    """PUT /api/settings/initial-base-path request body.
+
+    Called by Tauri on first launch to set the OS-specific base path
+    *before* category seeding happens.
+    """
+
+    default_base_path: str = Field(
+        ...,
+        min_length=1,
+        description="Absolute path for the default base folder (e.g. ~/Documents/KlinFiles).",
+        examples=["/Users/sarun/Documents/KlinFiles"],
+    )

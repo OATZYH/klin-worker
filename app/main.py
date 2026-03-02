@@ -7,7 +7,7 @@ FastAPI application entry point.
   • CORS enabled for Tauri dev mode
   • Health-check at /health
   • Organize API at /api/organize
-  • Categories CRUD at /api/categories
+  • Settings API at /api/settings (categories, base path, etc.)
   • History log at /api/history
 """
 
@@ -19,15 +19,13 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.categories import router as categories_router
 from app.api.history import router as history_router
 from app.api.organize import router as organize_router
+from app.api.settings import router as settings_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
-from app.services.classification_service import ClassificationService
 from app.services.llm_client import llm_client
 from app.services.rag_service import RagService
-from app.services.seed_service import generate_missing_embeddings, seed_default_categories
 from app.services.startup_checks import CheckResult, run_all_checks
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -95,33 +93,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("Startup checks failed to execute.", exc_info=True)
 
-    # Check if llama-cpp-python model is loaded (needed for embeddings)
-    _llamacpp_ok = any(r.name == "llama-cpp-python" and r.ok for r in _startup_checks)
-
-    # ── 5. Seed default categories & generate embeddings ─────────────
-    try:
-        from app.db.session import AsyncSession, engine
-
-        async with AsyncSession(engine, expire_on_commit=False) as db:
-            seeded = await seed_default_categories(db)
-            await db.commit()
-
-            if seeded > 0:
-                logger.info("First run detected — %d default categories created.", seeded)
-
-            if _rag_service.is_ready and _llamacpp_ok:
-                classifier = ClassificationService(_rag_service)
-                embedded = await generate_missing_embeddings(db, classifier)
-                await db.commit()
-                if embedded > 0:
-                    logger.info("Generated embeddings for %d categories.", embedded)
-            elif not _llamacpp_ok:
-                logger.warning(
-                    "Skipping category embedding generation — GGUF model is not loaded. "
-                    "Embeddings will be generated on next startup when the model is available."
-                )
-    except Exception:
-        logger.warning("Category seeding / embedding generation failed.", exc_info=True)
+    # NOTE: Category seeding is no longer done at startup.
+    # Tauri calls PUT /api/settings/initial-base-path on launch, which
+    # sets the OS-specific base path AND seeds default categories.
 
     yield  # ← application runs here
 
@@ -149,7 +123,7 @@ app.add_middleware(
 
 # Routers
 app.include_router(organize_router)
-app.include_router(categories_router)
+app.include_router(settings_router)
 app.include_router(history_router)
 
 

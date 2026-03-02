@@ -4,6 +4,8 @@ Categories API router.
 CRUD endpoints for user-defined categories.
 Each category has a name, description, color, and optional destination path.
 When description changes, the embedding is regenerated automatically.
+
+Mounted at: /api/settings/categories
 """
 
 import json
@@ -23,7 +25,7 @@ from app.services.seed_service import _build_embed_text
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/categories", tags=["categories"])
+router = APIRouter(prefix="/categories", tags=["categories"])
 
 
 # ── Dependency Injection ─────────────────────────────────────────────────

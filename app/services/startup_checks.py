@@ -23,6 +23,46 @@ from app.services.llm_client import llm_client
 logger = logging.getLogger(__name__)
 
 
+# ── Error classification ─────────────────────────────────────────────────
+
+
+def _classify_db_error(exc: Exception) -> str:
+    """
+    Return a safe, user-facing error description based on exception type.
+
+    Full details are logged separately — this never exposes SQL,
+    column names, or internal paths to the API consumer.
+    """
+    err_str = str(exc).lower()
+
+    # Schema mismatch (missing column / table)
+    if "no such column" in err_str or "no such table" in err_str:
+        return "schema_mismatch — run migrations to update the database."
+
+    # DB file cannot be opened (permissions, missing dir, corrupt)
+    if "unable to open database" in err_str:
+        return "connection_failed — database file is not accessible."
+
+    # Database is locked (another process holds the lock)
+    if "database is locked" in err_str:
+        return "database_locked — another process is using the database."
+
+    # Read-only filesystem / permission denied
+    if "readonly" in err_str or "permission denied" in err_str:
+        return "permission_denied — cannot write to the database file."
+
+    # Disk full
+    if "disk" in err_str and "full" in err_str:
+        return "disk_full — not enough disk space for database operations."
+
+    # Corrupt database
+    if "malformed" in err_str or "corrupt" in err_str:
+        return "database_corrupt — the database file may be damaged."
+
+    # Fallback: generic with the exception class name only
+    return f"unexpected_error — {type(exc).__name__}"
+
+
 @dataclass
 class CheckResult:
     """Outcome of a single startup check."""
@@ -52,7 +92,10 @@ async def check_database(db: AsyncSession) -> CheckResult:
             count_detail = "connected, has data"
         return CheckResult(name=name, ok=True, detail=f"{settings.database_path} — {count_detail}")
     except Exception as exc:
-        return CheckResult(name=name, ok=False, detail=str(exc))
+        # Log full error for debugging, but expose only error type to the API
+        logger.error("Database check failed: %s", exc, exc_info=True)
+        detail = _classify_db_error(exc)
+        return CheckResult(name=name, ok=False, detail=detail)
 
 
 async def check_llamacpp() -> CheckResult:

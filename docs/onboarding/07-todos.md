@@ -51,8 +51,13 @@ uv run uvicorn app.main:app --reload
 # 4. Test health check
 curl http://127.0.0.1:8000/health
 
-# 5. List categories (12 defaults are auto-seeded at startup!)
-curl http://127.0.0.1:8000/api/categories
+# 5. Set initial base path + seed categories (Tauri does this on launch)
+curl -X PUT http://127.0.0.1:8000/api/settings/initial-base-path \
+  -H "Content-Type: application/json" \
+  -d '{"default_base_path": "/Users/you/Documents/KlinFiles"}'
+
+# 6. List categories (seeded by the step above)
+curl http://127.0.0.1:8000/api/settings/categories
 
 # 6. Organize a file
 curl -X POST http://127.0.0.1:8000/api/organize \

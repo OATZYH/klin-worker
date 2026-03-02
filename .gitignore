@@ -23,3 +23,6 @@ ai/
 
 # Local dev storage (SQLite + RAG)
 .storage/
+
+# Tests
+klin-test/
