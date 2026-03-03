@@ -114,11 +114,34 @@ class LlmClient:
         Generate embeddings for a list of texts.
 
         Returns a list of float vectors, one per input text.
+
+        Note: Some models (e.g. Gemma) return per-token embeddings as a 2D
+        list per data item (shape [n_tokens, n_embd]) rather than a single
+        pooled 1D vector. We detect this and mean-pool the token vectors
+        into a single document vector.
         """
         self._assert_loaded()
 
         result = self._llm.create_embedding(input=texts)  # type: ignore[union-attr]
-        return [item["embedding"] for item in result["data"]]  # type: ignore[return-value]
+        data = result["data"]  # type: ignore[index]
+
+        pooled: list[list[float]] = []
+        for item in data:
+            emb = item["embedding"]
+            # Detect 2D per-token embeddings: list of lists
+            if emb and isinstance(emb[0], list):
+                # Mean-pool token vectors → single document vector
+                n_tokens = len(emb)
+                dim = len(emb[0])
+                avg = [
+                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                    for d in range(dim)
+                ]
+                pooled.append(avg)
+            else:
+                # Already a 1D vector
+                pooled.append(emb)
+        return pooled
 
     # ── Async wrappers (for FastAPI / async services) ────────────────────
 

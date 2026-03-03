@@ -16,6 +16,7 @@ import logging
 from fastapi import APIRouter, Depends
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models import File, FileAnalysis
 from app.db.session import get_db
@@ -145,10 +146,13 @@ async def _process_single_file(
 
     # ── Step 2: Upsert file record ───────────────────────────────────
     existing = await db.execute(
-        select(File).where(File.original_path == scan.original_path)
+        select(File)
+        .options(selectinload(File.analysis))
+        .where(File.original_path == scan.original_path)
     )
     file_record = existing.scalar_one_or_none()
 
+    is_new_file = False
     if file_record:
         # Update hash/size if file changed
         file_record.hash = scan.sha256
@@ -162,6 +166,7 @@ async def _process_single_file(
             extension=scan.extension,
         )
         db.add(file_record)
+        is_new_file = True
 
     await db.flush()  # assign file_record.id
 
@@ -180,7 +185,7 @@ async def _process_single_file(
     )
 
     # ── Step 6: Store analysis ───────────────────────────────────────
-    if file_record.analysis:
+    if not is_new_file and file_record.analysis:
         file_record.analysis.summary = summary_text
         file_record.analysis.suggested_name = suggested_name
     else:
