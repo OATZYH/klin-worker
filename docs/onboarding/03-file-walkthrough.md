@@ -5,11 +5,11 @@
 ### `main.py` (Project Root)
 
 ```python
-# Convenience launcher — same as `uv run uvicorn app.main:app --reload`
+# Convenience launcher — same as `uv run fastapi dev app/main.py`
 uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=True)
 ```
 
-**What it does:** Just a shortcut to start the server. You can run `uv run python main.py` or `uv run uvicorn app.main:app --reload` — same thing.
+**What it does:** Just a shortcut to start the server. You can run `uv run python main.py` or `uv run fastapi dev app/main.py` — same thing.
 
 ### `app/main.py` (FastAPI App Factory)
 

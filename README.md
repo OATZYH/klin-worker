@@ -68,7 +68,11 @@ cp .env.example .env
 ### 4. Start the server
 
 ```bash
-uv run uvicorn app.main:app --reload
+# Development (auto-reload enabled)
+uv run fastapi dev app/main.py
+
+# Production
+uv run fastapi run app/main.py
 ```
 
 The server starts at `http://127.0.0.1:8000`. On first boot it will:

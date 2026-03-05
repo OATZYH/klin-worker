@@ -46,7 +46,7 @@ mkdir -p models && wget -O models/gemma-3-1b-it-Q4_K_M.gguf \
 uv sync
 
 # 3. Start the server
-uv run uvicorn app.main:app --reload
+uv run fastapi dev app/main.py
 
 # 4. Test health check
 curl http://127.0.0.1:8000/health
