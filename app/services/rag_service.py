@@ -92,10 +92,53 @@ class RagService:
                 messages.append({"role": "user", "content": prompt})
                 return await llm_client.achat(messages)
 
+            # Vision / multimodal completion for RAG-Anything's
+            # Visual Content Analyzer (image captions, table analysis, etc.)
+            async def _vision_complete(
+                prompt,
+                system_prompt=None,
+                history_messages=None,
+                image_data=None,
+                messages=None,
+                **kwargs,
+            ):
+                if messages:
+                    # Pre-formatted multimodal messages from RAG-Anything
+                    return await llm_client.achat_with_vision(messages)
+                elif image_data:
+                    # Raw base64 image — build OpenAI-style multimodal message
+                    content: list[dict] = [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{image_data}",
+                            },
+                        },
+                    ]
+                    msgs: list[dict] = []
+                    if system_prompt:
+                        msgs.append({"role": "system", "content": system_prompt})
+                    msgs.append({"role": "user", "content": content})
+                    return await llm_client.achat_with_vision(msgs)
+                else:
+                    # No visual content — use standard text LLM
+                    return await _llm_complete(
+                        prompt, system_prompt, history_messages, **kwargs
+                    )
+
             self._rag = RAGAnything(
                 config=config,
                 llm_model_func=_llm_complete,
+                vision_model_func=_vision_complete,
                 embedding_func=embedding_func,
+                # Limit concurrency for local in-process models to avoid OOM.
+                # Default LightRAG values (8 embed, 4 LLM) are designed for
+                # API-based models; local GGUF models share a single process.
+                lightrag_kwargs={
+                    "embedding_func_max_async": 1,
+                    "llm_model_max_async": 1,
+                },
             )
             self._ready = True
             logger.info(
@@ -171,6 +214,33 @@ class RagService:
         except Exception as exc:
             logger.error("Semantic search failed: %s", exc)
             return []
+
+    async def multimodal_search(
+        self,
+        query: str,
+        multimodal_content: list[dict[str, Any]] | None = None,
+        top_k: int = 5,
+    ) -> list[dict[str, Any]]:
+        """
+        Search with optional multimodal content for richer results.
+
+        Falls back to standard text query if multimodal is unavailable.
+        """
+        self._assert_ready()
+
+        try:
+            if multimodal_content and hasattr(self._rag, "aquery_with_multimodal"):
+                results = await self._rag.aquery_with_multimodal(
+                    query,
+                    multimodal_content=multimodal_content,
+                    mode="hybrid",
+                )
+            else:
+                results = await self._rag.aquery(query)
+            return self._format_results(results, top_k)
+        except Exception as exc:
+            logger.error("Multimodal search failed, falling back to text: %s", exc)
+            return await self.semantic_search(query, top_k)
 
     # ── Duplicate Detection (stub — ready for enhancement) ───────────
 

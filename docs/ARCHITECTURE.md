@@ -336,17 +336,23 @@ never raised.
 
 **File:** `app/services/rag_service.py`  
 **Pattern:** Singleton — initialised once at startup  
-**Responsibility:** Semantic analysis + embedding generation
+**Responsibility:** Semantic analysis + embedding generation + multimodal (vision) analysis
 
 **New in v2:** Exposes `embed_texts(texts)` for generating raw embedding
 vectors used by ClassificationService.
 
+**Vision Analyzer:** `RAGAnything` is initialised with a `vision_model_func` (`_vision_complete`)  
+that routes image/multimodal content through `LlmClient.achat_with_vision()`. This enables  
+RAG-Anything's Visual Content Analyzer to caption images and analyse tables inside documents.  
+If the loaded GGUF model lacks vision support, `LlmClient` automatically falls back to text-only.
+
 | Method | Description |
 |---|---|
-| `setup()` | One-time init. Connects RAG-Anything → LightRAG → llama-cpp-python |
+| `setup()` | One-time init. Connects RAG-Anything → LightRAG → llama-cpp-python (+ vision_model_func) |
 | `embed_texts(texts)` | Generate embedding vectors for arbitrary text |
-| `ingest(file_path)` | Parse + embed a file into the knowledge graph |
+| `ingest(file_path)` | Parse + embed a file into the knowledge graph (images & tables via vision LLM) |
 | `semantic_search(query)` | Query the corpus for semantically similar content |
+| `multimodal_search(query, multimodal_content)` | Search with optional image/table content; falls back to text |
 | `find_duplicates(file_path)` | Stub for near-duplicate detection |
 
 ---
@@ -424,18 +430,22 @@ The GGUF model is loaded directly into the FastAPI process via `llama-cpp-python
 No external server is required — all inference happens in-process.
 
 ```
-┌─────────────────┐     ┌───────────┐     ┌──────────────────┐
-│ RagService      │ ──► │ LightRAG  │     │  llama-cpp-python│
-│ SummaryService  │ ──► │           │ ──► │  (in-process)    │
-│ RenameService   │ ──► │ llm_func  │────►│  gemma-3-1b-it   │
-│ Classification  │     │ embed_func│────►│  Q4_K_M.gguf     │
-│   Service       │     └───────────┘     └──────────────────┘
-└─────────────────┘           │
-                              ▼
-                     ┌────────────────┐
-                     │   LlmClient    │  ← singleton, loaded once at startup
-                     │  (llm_client)  │
-                     └────────────────┘
+┌─────────────────┐     ┌───────────────────┐     ┌──────────────────┐
+│ RagService      │ ──► │ LightRAG /        │     │  llama-cpp-python│
+│ SummaryService  │ ──► │ RAGAnything       │ ──► │  (in-process)    │
+│ RenameService   │ ──► │  llm_model_func   │────►│  GGUF model      │
+│ Classification  │     │  vision_model_func│────►│  (chat + vision) │
+│   Service       │     │  embedding_func   │────►│  (embeddings)    │
+└─────────────────┘     └───────────────────┘     └──────────────────┘
+                                  │
+                                  ▼
+                         ┌────────────────┐
+                         │   LlmClient    │  ← singleton, loaded once at startup
+                         │  (llm_client)  │
+                         │  achat()       │  ← text completion
+                         │  achat_with_vision() ← multimodal (auto-fallback)
+                         │  aembed()      │  ← embeddings
+                         └────────────────┘
 ```
 
 ### Model Capabilities
@@ -443,7 +453,12 @@ No external server is required — all inference happens in-process.
 | Capability | Method | Used For |
 |---|---|---|
 | Chat completion | `LlmClient.achat()` | Entity extraction, summarisation, rename suggestions, RAG query answering |
+| Vision / multimodal completion | `LlmClient.achat_with_vision()` | Image captions, table analysis via RAGAnything's Visual Content Analyzer |
 | Embedding | `LlmClient.aembed()` | File content vectors, category description vectors, cosine similarity |
+
+### Vision Auto-Detection
+
+`LlmClient.chat_with_vision()` uses a lazy probe strategy: the first call with image content is forwarded as-is. If the model rejects it (exception), `_vision_supported` is set to `False` and subsequent calls automatically strip image blocks and retry as text-only. A vision-capable GGUF (e.g. Qwen2.5-VL) is required for full multimodal analysis; text-only models still work but image content is silently degraded to a placeholder.
 
 ---
 

@@ -41,12 +41,14 @@ This is the **heart** of the application. It does:
      "version": "0.2.0",
      "services": {
        "Database (SQLite)": { "ok": true, "detail": ".storage/klin.db — connected, has data" },
-       "llama-cpp-python":    { "ok": true, "detail": "Model loaded — models/gemma-3-1b-it-Q4_K_M.gguf" },
+       "llama-cpp-python":    { "ok": true, "detail": "Model loaded — models/Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf" },
        "RAG-Anything":       { "ok": true, "detail": "Ready — storage: .storage/rag_storage" }
      },
      "rag_ready": true
    }
    ```
+
+   **Vision support:** If the loaded GGUF is a vision-capable model (e.g. Qwen2.5-VL, Qwen3VL), RAG-Anything's Visual Content Analyzer will use it to caption images and analyse tables embedded in documents (PDF, DOCX, etc.). `LlmClient` probes vision support lazily on the first call — text-only models fall back silently without breaking ingestion.
 
 **Key concept — Lifespan:** FastAPI's lifespan is like `__init__` and `__del__` for the whole app. Everything before `yield` runs at startup, everything after runs at shutdown.
 
@@ -64,7 +66,7 @@ A single `Settings` class using `pydantic-settings`. All environment variables a
 |---|---|---|
 | `database_path` | `.storage/klin.db` | SQLite location |
 | `rag_working_dir` | `.storage/rag_storage` | RAG-Anything data |
-| `llamacpp_model_path` | `models/gemma-3-1b-it-Q4_K_M.gguf` | Path to GGUF model |
+| `llamacpp_model_path` | `models/gemma-3-1b-it-Q4_K_M.gguf` | Path to GGUF model (swap for vision-capable GGUF to enable image analysis) |
 | `llamacpp_n_ctx` | `2048` | Context window size |
 | `llamacpp_n_gpu_layers` | `0` | GPU offload (-1 = all) |
 | `llamacpp_embedding_dim` | `2048` | Vector size (must match model!) |

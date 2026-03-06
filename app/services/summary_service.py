@@ -20,12 +20,15 @@ class SummaryService:
     def __init__(self, rag_service: Any) -> None:
         self._rag = rag_service
 
+    _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
+
     async def summarise(self, file_path: str) -> str | None:
         """
         Generate a one-paragraph summary for a file.
 
         Steps:
           1. Query RAG for content related to the file
+             (uses multimodal search for image files)
           2. Send content to LLM for summarisation
         """
         # 1. Retrieve content from RAG (if available)
@@ -34,8 +37,22 @@ class SummaryService:
             try:
                 from pathlib import Path
 
-                query = f"Content of file {Path(file_path).name}"
-                results = await self._rag.semantic_search(query, top_k=3)
+                p = Path(file_path)
+                query = f"Content of file {p.name}"
+
+                # Use multimodal search for image files
+                if p.suffix.lower() in self._IMAGE_EXTENSIONS:
+                    results = await self._rag.multimodal_search(
+                        query,
+                        multimodal_content=[{
+                            "type": "image",
+                            "file_path": str(p.resolve()),
+                        }],
+                        top_k=3,
+                    )
+                else:
+                    results = await self._rag.semantic_search(query, top_k=3)
+
                 if results:
                     context = "\n".join(
                         r.get("content", str(r)) if isinstance(r, dict) else str(r)

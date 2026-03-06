@@ -72,7 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning(
             "llama-cpp-python model failed to load — "
-            "the API will work without AI features."
+            "the API will work without AI features.",
+            exc_info=True,
         )
 
     # ── 4. Initialise RAG-Anything (heavy — do it once) ──────────────

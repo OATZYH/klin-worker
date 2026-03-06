@@ -41,20 +41,29 @@ async def setup(self):
     # 1. Import RAG-Anything + LightRAG
     # 2. Create working directory (.storage/rag_storage/)
     # 3. Configure embedding function → uses llm_client.aembed()
-    # 4. Create RAGAnything instance with:
-    #    - LLM function → llm_client.achat() (in-process)
-    #    - Embedding function → llm_client.aembed() (in-process)
-    #    - Working dir for persistent storage
-    # 5. Mark as ready
+    # 4. Configure LLM text function → uses llm_client.achat()
+    # 5. Configure vision function (_vision_complete) → routes image/table content:
+    #      a. Pre-formatted multimodal messages from RAG-Anything
+    #         → llm_client.achat_with_vision(messages)
+    #      b. Raw base64 image data
+    #         → build OpenAI-style image_url block → llm_client.achat_with_vision()
+    #      c. No visual content → fall back to standard _llm_complete()
+    # 6. Create RAGAnything instance with:
+    #    - llm_model_func    → _llm_complete     (text LLM)
+    #    - vision_model_func → _vision_complete  (vision / multimodal LLM)
+    #    - embedding_func    → _embed             (in-process)
+    #    - lightrag_kwargs   → concurrency limits (max_async=1 for local GGUF)
+    # 7. Mark as ready
 ```
 
 **Connection chain:**
 ```
 RagService.setup()
-    → RAGAnything(config, llm_model_func, embedding_func)
+    → RAGAnything(config, llm_model_func, vision_model_func, embedding_func, lightrag_kwargs)
         → LightRAG internally
-            → LlmClient (in-process llama-cpp-python)
-                → gemma-3-1b-it-Q4_K_M.gguf (chat + embeddings)
+            → LlmClient.achat()             (text: entity extraction, graph queries)
+            → LlmClient.achat_with_vision() (vision: image captions, table analysis)
+            → LlmClient.aembed()            (embeddings: vectors for similarity search)
 ```
 
 **`embed_texts(texts)` — Generate Embeddings:**
@@ -80,6 +89,17 @@ async def semantic_search(self, query: str, top_k: int = 5):
 ```
 
 Used by `SummaryService` to get context about a file before asking the LLM for a summary.
+
+**`multimodal_search(query, multimodal_content)` — Multimodal Search:**
+```python
+async def multimodal_search(self, query: str, multimodal_content: list | None = None, top_k: int = 5):
+    if multimodal_content and hasattr(self._rag, "aquery_with_multimodal"):
+        results = await self._rag.aquery_with_multimodal(query, multimodal_content=multimodal_content, mode="hybrid")
+    else:
+        results = await self._rag.aquery(query)  # falls back to text-only
+```
+
+Accepts optional `multimodal_content` (list of image/text dicts) for richer queries. Falls back automatically to `semantic_search` on any error.
 
 ---
 

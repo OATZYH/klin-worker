@@ -6,12 +6,12 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiofiles>=25.1.0",
-    "aiosqlite>=0.20.0",
+    "aiosqlite>=0.22.1",
     "alembic>=1.18.4",
-    "fastapi[standard]>=0.133.0",
+    "fastapi[standard]>=0.135.1",
     "greenlet>=3.3.2",
-    "llama-cpp-python>=0.3.0",
-    "numpy>=2.0.0",
+    "llama-cpp-python>=0.3.16",
+    "numpy>=2.4.2",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.13.1",
     "python-multipart>=0.0.22",

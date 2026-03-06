@@ -31,34 +31,44 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CATEGORIES: list[dict[str, Any]] = [
     {
+        "name": "Photos & Media",
+        "description": "Photos, videos, screenshots, and media files.",
+        "keywords_text": (
+            "photo, picture, image, screenshot, wallpaper, album, selfie, "
+            "video, clip, recording, media file, camera photo, gallery, "
+            "รูปภาพ, ภาพถ่าย, สกรีนช็อต, วิดีโอ, อัลบั้ม, กล้อง, "
+            ".jpg .jpeg .png .heic .gif .mp4 .mov .avi .mkv"
+        ),
+        "color": "#06b6d4",  # cyan
+    },
+    {
         "name": "Creative Projects",
-        "description": "Creative and artistic works including writing, design, media production, and personal creative output.",
+        "description": "Creative and artistic works including writing, design, media production, and creative output.",
         "keywords_text": (
             "creative writing, novel, story, poem, script, screenplay, design brief, "
-            "moodboard, art project, portfolio, photography, illustration, video production, "
+            "moodboard, art project, portfolio, illustration, video production, "
             "music composition, creative concept, artwork, storyboard, branding, content creation, "
-            "artistic expression, creative draft, "
-            "งานสร้างสรรค์, งานศิลปะ, นิยาย, บทกวี, บทภาพยนตร์, โปรเจคออกแบบ, แบรนดิ้ง, "
-            "พอร์ตโฟลิโอ, ถ่ายภาพ, วิดีโอ, ดนตรี, ไอเดีย, "
-            ".psd .ai .png .jpg .mp4 .docx .pdf .pptx"
+            "งานสร้างสรรค์, งานศิลปะ, นิยาย, บทกวี, บทภาพยนตร์, โปรเจคออกแบบ, "
+            "พอร์ตโฟลิโอ, ภาพประกอบ, ดนตรี, ไอเดียสร้างสรรค์, "
+            ".psd .ai .blend .fig .sketch"
         ),
         "color": "#ec4899",  # pink
     },
     {
-        "name": "Work & Projects",
-        "description": "Professional business documents, corporate files, client work, project planning.",
+        "name": "Work & Business",
+        "description": "Professional work documents, business files, and project planning.",
         "keywords_text": (
             "project plan, meeting notes, presentation, proposal, company profile, "
-            "contract draft, business strategy, roadmap, sprint planning, OKR, KPI, "
-            "client deliverable, invoice draft, internal document, "
-            "เอกสารบริษัท, แผนงาน, โน้ตประชุม, โปรเจคงาน, ข้อเสนอ, กลยุทธ์, ลูกค้า, "
+            "business strategy, roadmap, sprint planning, OKR, KPI, "
+            "client deliverable, internal document, report, documentation, "
+            "เอกสารบริษัท, แผนงาน, โน้ตประชุม, โปรเจคงาน, ข้อเสนอ, กลยุทธ์ธุรกิจ, "
             ".pptx .xlsx .docx .pdf"
         ),
         "color": "#3b82f6",  # blue
     },
     {
         "name": "Finance & Invoices",
-        "description": "Financial records, transactions, billing documents, payment confirmations.",
+        "description": "Financial records, billing documents, and payment information.",
         "keywords_text": (
             "invoice, receipt, billing statement, bank statement, transaction history, "
             "tax document, payment confirmation, credit card statement, expense report, "
@@ -69,7 +79,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
     },
     {
         "name": "Legal & Contracts",
-        "description": "Legal agreements, official documents, compliance papers.",
+        "description": "Legal agreements, contracts, and official documents.",
         "keywords_text": (
             "contract, agreement, NDA, terms and conditions, legal notice, "
             "license agreement, court document, compliance document, "
@@ -78,38 +88,38 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
         "color": "#64748b",  # slate
     },
     {
-        "name": "Education & Learning",
-        "description": "Learning materials, course content, academic documents.",
+        "name": "Education & Research",
+        "description": "Learning materials, academic papers, and research documents.",
         "keywords_text": (
             "lecture notes, study material, textbook, syllabus, assignment, "
-            "research notes, academic paper, thesis draft, "
-            "โน้ตเรียน, หนังสือเรียน, รายงาน, งานวิจัย, วิทยานิพนธ์"
+            "research paper, journal article, thesis draft, dataset description, "
+            "โน้ตเรียน, หนังสือเรียน, รายงาน, งานวิจัย, วิทยานิพนธ์, บทความวิชาการ"
         ),
         "color": "#f59e0b",  # amber
     },
     {
         "name": "Personal",
-        "description": "Private personal documents and memories.",
+        "description": "Private personal files, identification, and daily life documents.",
         "keywords_text": (
             "personal letter, diary, journal, private note, family document, "
-            "personal record, "
+            "personal record, ID card copy, certificate, "
             "บันทึกส่วนตัว, จดหมาย, เอกสารส่วนตัว, ครอบครัว"
         ),
         "color": "#a855f7",  # purple
     },
     {
-        "name": "Travel & Vacation",
-        "description": "Travel-related documents and bookings.",
+        "name": "Travel",
+        "description": "Travel bookings, itineraries, and travel documents.",
         "keywords_text": (
             "flight ticket, boarding pass, hotel reservation, itinerary, "
             "visa document, travel insurance, "
             "ตั๋วเครื่องบิน, แผนการเดินทาง, จองโรงแรม, วีซ่า"
         ),
-        "color": "#06b6d4",  # cyan
+        "color": "#0ea5e9",  # sky
     },
     {
         "name": "Health & Medical",
-        "description": "Medical records and healthcare-related files.",
+        "description": "Medical reports, prescriptions, and healthcare documents.",
         "keywords_text": (
             "medical report, lab result, prescription, doctor appointment, "
             "treatment plan, hospital bill, "
@@ -118,37 +128,8 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
         "color": "#ef4444",  # red
     },
     {
-        "name": "Technology & Manuals",
-        "description": "Technical documentation and system guides.",
-        "keywords_text": (
-            "API documentation, system architecture, user manual, troubleshooting guide, "
-            "technical specification, SDK guide, "
-            "คู่มือ, เอกสารเทคนิค, API, สเปคระบบ"
-        ),
-        "color": "#6366f1",  # indigo
-    },
-    {
-        "name": "Research & Studies",
-        "description": "Research papers and academic publications.",
-        "keywords_text": (
-            "research paper, journal article, scientific study, academic publication, "
-            "dataset description, "
-            "งานวิจัย, บทความวิชาการ, วารสาร"
-        ),
-        "color": "#14b8a6",  # teal
-    },
-    {
-        "name": "Home & Household",
-        "description": "Household management and property documents.",
-        "keywords_text": (
-            "utility bill, property document, maintenance record, warranty document, "
-            "ค่าน้ำ, ค่าไฟ, โฉนด, ใบรับประกัน"
-        ),
-        "color": "#f97316",  # orange
-    },
-    {
         "name": "General Documents",
-        "description": "Unclassified or mixed documents that don't fit a specific category.",
+        "description": "Unclassified or mixed documents that do not fit another category.",
         "keywords_text": (
             "miscellaneous document, general file, uncategorized, "
             "เอกสารทั่วไป"
@@ -156,7 +137,6 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
         "color": "#78716c",  # stone
     },
 ]
-
 
 # ── Public API ───────────────────────────────────────────────────────────
 

@@ -33,6 +33,7 @@ class LlmClient:
 
     def __init__(self) -> None:
         self._llm: Llama | None = None
+        self._vision_supported: bool | None = None  # None = not yet tested
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -143,6 +144,85 @@ class LlmClient:
                 pooled.append(emb)
         return pooled
 
+    # ── Vision / multimodal ─────────────────────────────────────────────
+
+    def chat_with_vision(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> str:
+        """
+        Chat completion that accepts OpenAI-style multimodal messages.
+
+        If the loaded model supports vision, image_url content blocks are
+        forwarded as-is.  Otherwise the images are stripped and the request
+        is retried as text-only so the pipeline never hard-fails.
+        """
+        self._assert_loaded()
+
+        # Fast path: we already know the model lacks vision
+        if self._vision_supported is False:
+            return self.chat(
+                self._strip_images(messages),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        try:
+            result: dict[str, Any] = self._llm.create_chat_completion(  # type: ignore[union-attr]
+                messages=messages,  # type: ignore[arg-type]
+                temperature=temperature,
+                max_tokens=max_tokens or settings.max_token_size,
+            )
+            if self._vision_supported is None:
+                self._vision_supported = True
+                logger.info("Vision support confirmed — multimodal messages accepted.")
+            return result["choices"][0]["message"]["content"].strip()
+        except Exception as exc:
+            if self._vision_supported is None:
+                self._vision_supported = False
+                logger.warning(
+                    "Model does not support vision input — falling back to text-only. "
+                    "Swap to a vision-capable GGUF to enable image analysis. (%s)",
+                    exc,
+                )
+            # Retry without image blocks
+            return self.chat(
+                self._strip_images(messages),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+    @property
+    def supports_vision(self) -> bool:
+        """Whether the loaded model accepts multimodal (image) messages."""
+        return self._vision_supported is True
+
+    @staticmethod
+    def _strip_images(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """Remove image_url blocks from multimodal messages, keeping text."""
+        cleaned: list[dict[str, str]] = []
+        for msg in messages:
+            if msg is None:
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Extract only text parts from multimodal content array
+                text_parts = [
+                    part["text"]
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ]
+                cleaned.append({
+                    "role": msg["role"],
+                    "content": "\n".join(text_parts) or "(image content — vision model required)",
+                })
+            elif isinstance(content, str):
+                cleaned.append({"role": msg["role"], "content": content})
+        return cleaned
+
     # ── Async wrappers (for FastAPI / async services) ────────────────────
 
     async def achat(
@@ -155,6 +235,21 @@ class LlmClient:
         """Async wrapper around `chat()`."""
         return await asyncio.to_thread(
             self.chat,
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    async def achat_with_vision(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Async wrapper around `chat_with_vision()`."""
+        return await asyncio.to_thread(
+            self.chat_with_vision,
             messages,
             temperature=temperature,
             max_tokens=max_tokens,

@@ -61,9 +61,10 @@ In this project, we embed a **file** and a **category description**, then comput
 
 [RAG-Anything](https://github.com/RAG-Anything/RAG-Anything) is a **wrapper** around LightRAG that adds:
 
-- Multi-modal support (text, images, tables, etc.)
+- Multi-modal support (text, images, tables, etc.) including a **Visual Content Analyzer**
 - Easy configuration via `RAGAnythingConfig`
 - Simplified API: just call `process_document_complete(file_path)` to ingest
+- `vision_model_func` hook — our `_vision_complete` closure passed at init time routes image/table content to `LlmClient.achat_with_vision()` for captioning and layout analysis
 
 ---
 
@@ -74,16 +75,24 @@ Our Code (rag_service.py)
     │
     ▼
 RAGAnything                    ← High-level wrapper
+    ├── llm_model_func             ← _llm_complete   → LlmClient.achat()
+    ├── vision_model_func          ← _vision_complete → LlmClient.achat_with_vision()
+    └── embedding_func             ← _embed          → LlmClient.aembed()
     │
     ▼
 LightRAG                      ← Core RAG engine
     ├── Knowledge Graph         (entities + relationships)
     ├── Vector Storage          (embeddings for search)
-    └── Document Parsing        (text extraction)
+    └── Document Parsing        (text + image/table via vision model)
     │
     ▼
-llama-cpp-python (in-process)   ← Provides LLM + Embeddings (no server needed)
-    └── gemma-3-1b-it-Q4_K_M.gguf  (chat + embeddings from single model)
+llama-cpp-python (in-process)   ← Provides LLM + Vision + Embeddings (no server needed)
+    ├── achat()                 → text chat completion
+    ├── achat_with_vision()     → multimodal chat (image_url blocks)
+    └── aembed()                → embedding vectors
+
+Note: a vision-capable GGUF (e.g. Qwen2.5-VL-3B) is needed for full image analysis.
+Text-only models still work — LlmClient auto-detects support and falls back gracefully.
 ```
 
 ---
