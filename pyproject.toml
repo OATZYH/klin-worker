@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "klin-worker"
 version = "0.2.0"
@@ -19,4 +23,16 @@ dependencies = [
     "sqlmodel>=0.0.37",
     "uvicorn>=0.41.0",
 ]
+
+[project.scripts]
+klin-worker = "main:main"
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*", "models*", "docs*", "klin-bruno-api*"]
 
