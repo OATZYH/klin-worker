@@ -45,7 +45,7 @@ class RenameService:
             raw = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=settings.max_token_size,
+                max_tokens=settings.rename_max_tokens,
             )
             # Sanitise: keep only alphanumerics, underscores, hyphens
             clean = re.sub(r"[^\w\-]", "_", raw).strip("_")

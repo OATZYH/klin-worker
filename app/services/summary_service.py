@@ -48,10 +48,15 @@ class SummaryService:
                             "type": "image",
                             "file_path": str(p.resolve()),
                         }],
-                        top_k=3,
+                        top_k=settings.summary_rag_top_k,
+                        max_content_chars=settings.summary_context_max_chars,
                     )
                 else:
-                    results = await self._rag.semantic_search(query, top_k=3)
+                    results = await self._rag.semantic_search(
+                        query,
+                        top_k=settings.summary_rag_top_k,
+                        max_content_chars=settings.summary_context_max_chars,
+                    )
 
                 if results:
                     context = "\n".join(
@@ -83,7 +88,7 @@ class SummaryService:
             content = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=settings.max_token_size,
+                max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
         except Exception as exc:

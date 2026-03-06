@@ -17,6 +17,7 @@ ai/
 .agent/
 .agents/
 .claude/
+.gemini/
 
 # env
 .env

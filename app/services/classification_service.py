@@ -53,10 +53,12 @@ class ClassificationService:
             return []
 
         # 2. Load active categories with embeddings
+        is_active_column = getattr(Category, "is_active")
+        embedding_column = getattr(Category, "embedding")
         result = await db.execute(
             select(Category).where(
-                Category.is_active.is_(True),
-                Category.embedding.isnot(None),
+                is_active_column.is_(True),
+                embedding_column.isnot(None),
             )
         )
         categories = result.scalars().all()
@@ -73,6 +75,7 @@ class ClassificationService:
             scores.append({
                 "category_id": cat.id,
                 "name": cat.name,
+                "destination_path": cat.destination_path,
                 "score": round(float(score), 4),
             })
 
@@ -165,8 +168,9 @@ class ClassificationService:
         # Delete stale scores from previous runs
         from sqlmodel import delete
 
+        file_id_column = getattr(CategoryScore, "file_id")
         await db.execute(
-            delete(CategoryScore).where(CategoryScore.file_id == file_id)
+            delete(CategoryScore).where(file_id_column == file_id)
         )
 
         for s in scores:

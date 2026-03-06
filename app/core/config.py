@@ -102,6 +102,12 @@ class Settings(BaseSettings):
     llamacpp_max_token_size: int = 2048
     llamacpp_verbose: bool = False
 
+    # ── Organize pipeline tuning ────────────────────────────────────────
+    summary_rag_top_k: int = 2
+    summary_context_max_chars: int = 1200
+    summary_max_tokens: int = 192
+    rename_max_tokens: int = 48
+
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
     classification_top_k: int = 5  # max categories returned per file

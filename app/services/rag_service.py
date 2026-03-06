@@ -16,6 +16,7 @@ LLM backend: llama-cpp-python (in-process GGUF model).
 
 import logging
 from pathlib import Path
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -176,6 +177,7 @@ class RagService:
         Returns True on success, False on failure.
         """
         self._assert_ready()
+        started_at = time.perf_counter()
 
         try:
             path = Path(file_path)
@@ -188,10 +190,19 @@ class RagService:
             await self._rag.process_document_complete(
                 file_path=str(path.resolve()),
             )
-            logger.info("Ingested: %s", file_path)
+            logger.info(
+                "Ingested: %s (%.2f ms)",
+                file_path,
+                (time.perf_counter() - started_at) * 1000,
+            )
             return True
         except Exception as exc:
-            logger.error("Ingest failed for %s: %s", file_path, exc)
+            logger.error(
+                "Ingest failed for %s after %.2f ms: %s",
+                file_path,
+                (time.perf_counter() - started_at) * 1000,
+                exc,
+            )
             return False
 
     # ── Semantic Search ──────────────────────────────────────────────────
@@ -200,6 +211,7 @@ class RagService:
         self,
         query: str,
         top_k: int = 5,
+        max_content_chars: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search ingested corpus for semantically similar content.
@@ -210,7 +222,7 @@ class RagService:
 
         try:
             results = await self._rag.aquery(query)
-            return self._format_results(results, top_k)
+            return self._format_results(results, top_k, max_content_chars=max_content_chars)
         except Exception as exc:
             logger.error("Semantic search failed: %s", exc)
             return []
@@ -220,6 +232,7 @@ class RagService:
         query: str,
         multimodal_content: list[dict[str, Any]] | None = None,
         top_k: int = 5,
+        max_content_chars: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search with optional multimodal content for richer results.
@@ -237,10 +250,14 @@ class RagService:
                 )
             else:
                 results = await self._rag.aquery(query)
-            return self._format_results(results, top_k)
+            return self._format_results(results, top_k, max_content_chars=max_content_chars)
         except Exception as exc:
             logger.error("Multimodal search failed, falling back to text: %s", exc)
-            return await self.semantic_search(query, top_k)
+            return await self.semantic_search(
+                query,
+                top_k,
+                max_content_chars=max_content_chars,
+            )
 
     # ── Duplicate Detection (stub — ready for enhancement) ───────────
 
@@ -273,17 +290,36 @@ class RagService:
             )
 
     @staticmethod
-    def _format_results(raw: Any, top_k: int) -> list[dict[str, Any]]:
+    def _format_results(
+        raw: Any,
+        top_k: int,
+        *,
+        max_content_chars: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Normalise RAG-Anything output into a stable dict format."""
         if raw is None:
             return []
 
+        def _trim_content(value: Any) -> str:
+            text = str(value)
+            if max_content_chars and len(text) > max_content_chars:
+                return f"{text[:max_content_chars].rstrip()}…"
+            return text
+
+        def _normalise_item(item: Any) -> dict[str, Any]:
+            if isinstance(item, dict):
+                normalised = dict(item)
+                if "content" in normalised:
+                    normalised["content"] = _trim_content(normalised["content"])
+                return normalised
+            return {"content": _trim_content(item), "score": 1.0}
+
         # RAG-Anything may return different shapes — we normalise here
         if isinstance(raw, str):
-            return [{"content": raw, "score": 1.0}]
+            return [{"content": _trim_content(raw), "score": 1.0}]
 
         if isinstance(raw, list):
-            return raw[:top_k]
+            return [_normalise_item(item) for item in raw[:top_k]]
 
         # Fallback: wrap whatever we got
-        return [{"content": str(raw), "score": 1.0}]
+        return [{"content": _trim_content(raw), "score": 1.0}]
