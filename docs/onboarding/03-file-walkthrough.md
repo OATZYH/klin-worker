@@ -97,7 +97,7 @@ Uses **SQLModel** (combines Pydantic validation + SQLAlchemy ORM):
 
 | Table | Purpose | Key Columns |
 |---|---|---|
-| `categories` | Classification buckets (12 defaults + user-created) | `name`, `description`, `keywords_text`, `color`, `embedding` (JSON string), `is_default` |
+| `categories` | Classification buckets (default + user-created) | `name`, `description`, `color`, `embedding` (JSON string), `is_default` |
 | `files` | Scanned file metadata | `original_path`, `hash` (SHA-256), `size`, `extension` |
 | `file_analysis` | AI-generated analysis per file | `file_id` (FK), `summary`, `suggested_name` |
 | `category_scores` | AI classification score per file×category | `file_id` (FK), `category_id` (FK), `score` (float 0-1) |
@@ -105,7 +105,7 @@ Uses **SQLModel** (combines Pydantic validation + SQLAlchemy ORM):
 
 **Relationships:** `File` → has one `FileAnalysis`, many `CategoryScores`, many `HistoryLogs`.
 
-**Note:** `Category.embedding` stores the embedding vector as a **JSON-serialized string** (e.g. `"[0.23, -0.15, ...]"` ). The vector is generated from `name + description + keywords_text` for maximum semantic coverage. `is_default=True` marks the 12 system-seeded categories.
+**Note:** `Category.embedding` stores the embedding vector as a **JSON-serialized string** (e.g. `"[0.23, -0.15, ...]"` ). The vector is generated from `name + description`, and `description` may already contain keyword-style phrases for broader semantic coverage. `is_default=True` marks system-seeded categories.
 
 ### `app/db/session.py` — Async Engine & Dependency
 
@@ -147,14 +147,13 @@ class OrganizeRequest(BaseModel):
 
 class CategoryCreate(BaseModel):
     name: str             # e.g. "Receipts"
-    description: str      # e.g. "Purchase receipts and invoices"
-    keywords_text: str | None  # Semantic keywords (EN + TH) for richer embeddings
+    description: str      # e.g. "Purchase receipts and invoices\nreceipt, billing, VAT, payment"
     color: str            # Hex color like "#6366f1"
     destination_path: str | None  # Where to move files (optional)
 
 class CategoryUpdate(BaseModel):
     # All fields optional (partial update / PATCH semantics)
-    # Changing name, description, or keywords_text triggers re-embedding
+    # Changing name or description triggers re-embedding
 ```
 
 ### `app/models/response.py`

@@ -7,7 +7,9 @@ FastAPI application entry point.
   • CORS enabled for Tauri dev mode
   • Health-check at /health
   • Organize API at /api/organize
-  • Settings API at /api/settings (categories, base path, etc.)
+  • Summary API at /api/summary
+  • Categories API at /api/categories (V3)
+  • Settings API at /api/settings (base path, init, legacy categories)
   • History log at /api/history
 """
 
@@ -19,13 +21,18 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.categories import router as categories_router
 from app.api.history import router as history_router
 from app.api.organize import router as organize_router
 from app.api.settings import router as settings_router
+from app.api.summary import router as summary_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
+from app.services.background_ingest import ingest_worker
+from app.services.classification_service import ClassificationService
 from app.services.llm_client import llm_client
 from app.services.rag_service import RagService
+from app.services.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -85,22 +92,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "the API will work without semantic features."
         )
 
+    # ── 4b. Start background ingest worker ───────────────────────
+    if _rag_service.is_ready:
+        try:
+            await ingest_worker.start(_rag_service)
+        except Exception:
+            logger.warning(
+                "Background ingest worker failed to start.",
+                exc_info=True,
+            )
+
     # ── 5. Run startup checks (DB, llama-cpp-python, RAG) ───────────
     try:
         from app.db.session import AsyncSession, engine
 
         async with AsyncSession(engine, expire_on_commit=False) as db:
+            if _rag_service.is_ready and llm_client.is_loaded:
+                classifier = ClassificationService(_rag_service)
+                embedded = await generate_missing_embeddings(db, classifier)
+                if embedded > 0:
+                    logger.info(
+                        "Generated %d missing category embeddings at startup.",
+                        embedded,
+                    )
+                    await db.commit()
             _startup_checks = await run_all_checks(db, _rag_service)
     except Exception:
         logger.warning("Startup checks failed to execute.", exc_info=True)
 
-    # NOTE: Category seeding is no longer done at startup.
-    # Tauri calls PUT /api/settings/initial-base-path on launch, which
-    # sets the OS-specific base path AND seeds default categories.
+    # NOTE: Category seeding is done via PUT /api/settings/initial-base-path,
+    # which the Tauri frontend calls on launch.
 
     yield  # ← application runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────
+    await ingest_worker.stop()
     llm_client.shutdown()
     logger.info("👋  Shutting down %s", settings.app_name)
 
@@ -124,6 +150,8 @@ app.add_middleware(
 
 # Routers
 app.include_router(organize_router)
+app.include_router(summary_router)
+app.include_router(categories_router)
 app.include_router(settings_router)
 app.include_router(history_router)
 

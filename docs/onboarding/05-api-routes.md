@@ -48,7 +48,7 @@ app/api/settings/
 | `/api/settings/categories/{id}` | PATCH | Update category (re-embeds if name/description changes) |
 | `/api/settings/categories/{id}` | DELETE | Delete category |
 
-**Key behavior:** When you create/update a category, the embedding is auto-generated from `"{name}. {description}. {keywords_text}"` and stored as JSON in the `embedding` column. Changing `name`, `description`, or `keywords_text` triggers automatic re-embedding.
+**Key behavior:** When you create/update a category, the embedding is auto-generated from `name + description` and stored as JSON in the `embedding` column. The single `description` field may contain both prose and comma-separated keyword phrases. Changing `name` or `description` triggers automatic re-embedding.
 
 **Manual path flag:** Setting `destination_path` via PATCH marks `is_path_manual=true` — that category is excluded from auto-updates when the default base path changes.
 

@@ -42,7 +42,7 @@ Step 7 — AI CLASSIFY
 ├── Embed the file: "file .pdf. <AI summary>" → [0.23, -0.15, ...]
 │   (falls back to filename-only if no summary)
 ├── Load all category embeddings from DB
-│   (each category was embedded from name + description + keywords_text)
+│   (each category was embedded from name + description)
 ├── For each category: cosine_similarity(file_vec, cat_vec)
 ├── Sort by score descending
 ├── Keep top 5 (classification_top_k)
@@ -66,7 +66,7 @@ RETURN — OrganizeResponse
 
 Let's walk through a concrete example:
 
-### Setup: 12 categories are auto-seeded at boot
+### Setup: default categories are auto-seeded in the startup flow
 
 On first startup, `seed_service.py` inserts 12 default categories with rich keywords. For example:
 

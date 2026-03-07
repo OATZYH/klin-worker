@@ -36,13 +36,10 @@ def _category_to_response(cat: Category) -> CategoryResponse:
         id=cat.id,
         name=cat.name,
         description=cat.description,
-        keywords_text=cat.keywords_text,
         color=cat.color,
-        destination_path=cat.destination_path,
-        is_path_manual=cat.is_path_manual,
-        is_default=cat.is_default,
-        is_active=cat.is_active,
-        created_at=cat.created_at,
+        enabled=cat.is_active,
+        folder_path=cat.destination_path,
+        learning=False,
         updated_at=cat.updated_at,
     )
 

@@ -132,7 +132,7 @@ async def classify(self, file_id, file_path, db, summary=None) -> list[dict]:
 ```python
 # In seed_service.py — used by both seed and CRUD:
 def _build_embed_text(cat):
-    return ". ".join([cat.name, cat.description, cat.keywords_text])
+    return "\n".join([cat.name, cat.description])
 
 # In settings/categories.py router:
 embed_text = _build_embed_text(cat)
@@ -180,15 +180,13 @@ async def suggest_name(self, original_name, extension, summary) -> str | None:
 
 ## `seed_service.py` — Default Category Seeding
 
-Seeds 12 predefined categories and generates their embeddings.  
+Seeds default categories and generates their embeddings.  
 **Called by `PUT /api/settings/initial-base-path`** (not at startup) so the
 Tauri frontend can supply the OS-specific base path first.
 
 ```python
-# 12 default categories with rich semantic keywords (EN + TH):
-# Creative Projects, Work & Projects, Finance & Invoices, Legal & Contracts,
-# Education & Learning, Personal, Travel & Vacation, Health & Medical,
-# Technology & Manuals, Research & Studies, Home & Household, General Documents
+# Default categories store both prose and keyword phrases inside `description`
+# so embeddings still capture multilingual and file-type hints.
 
 async def seed_default_categories(db) -> int:
     # Idempotent: safe to call on every boot
@@ -197,7 +195,7 @@ async def generate_missing_embeddings(db, classifier) -> int:
     # Find categories where embedding IS NULL → embed and store
 ```
 
-**Why `keywords_text` matters:** A category named "Finance & Invoices" with description alone gives a narrow embedding. Adding keywords like `"receipt, billing statement, bank statement, ใบเสร็จ, ใบกำกับภาษี, .pdf .xlsx .csv"` makes the embedding capture much broader semantic meaning — including Thai language and file type hints.
+**Why rich `description` matters:** A category named "Finance & Invoices" works best when the description includes both a sentence and hints like `"receipt, billing statement, bank statement, ใบเสร็จ, ใบกำกับภาษี, .pdf, .xlsx, .csv"`. That single field still gives the embedding broader semantic meaning, including Thai language and file type hints.
 
 ---
 

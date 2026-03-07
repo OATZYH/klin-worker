@@ -93,13 +93,13 @@ class Settings(BaseSettings):
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
     # ── llama-cpp-python (in-process GGUF model) ───────────────────────
-    llamacpp_model_path: str = "models/gemma-3-1b-it-Q4_K_M.gguf"
-    llamacpp_n_ctx: int = 2048
-    llamacpp_n_gpu_layers: int = 0           # -1 = offload all layers to GPU
+    llamacpp_model_path: str = "models/Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf"
+    llamacpp_n_ctx: int = 4096
+    llamacpp_n_gpu_layers: int = -1           # -1 = offload all layers to GPU
     llamacpp_n_batch: int = 512
     llamacpp_n_threads: Optional[int] = None  # None = auto-detect
     llamacpp_embedding_dim: int = 2048        # model-native embedding dim
-    llamacpp_max_token_size: int = 2048
+    llamacpp_max_token_size: int = 4096
     llamacpp_verbose: bool = False
 
     # ── Organize pipeline tuning ────────────────────────────────────────

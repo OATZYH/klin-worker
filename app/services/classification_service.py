@@ -27,6 +27,67 @@ class ClassificationService:
 
     # ── Public API ───────────────────────────────────────────────────────
 
+    async def get_file_embedding(
+        self,
+        file_path: str,
+        summary: str | None = None,
+    ) -> list[float] | None:
+        """
+        Public wrapper for file embedding generation.
+
+        Can be called in parallel with summary generation (with summary=None)
+        or after summary is available (with summary set) for richer results.
+        """
+        return await self._get_file_embedding(file_path, summary=summary)
+
+    async def classify_with_embedding(
+        self,
+        file_id: str,
+        file_embedding: list[float],
+        db: AsyncSession,
+    ) -> list[dict[str, Any]]:
+        """
+        Score a file against all active categories using a pre-computed embedding.
+
+        This is the second half of the classify pipeline — call after
+        `get_file_embedding()` returns.
+        """
+        # Load active categories with embeddings
+        is_active_column = getattr(Category, "is_active")
+        embedding_column = getattr(Category, "embedding")
+        result = await db.execute(
+            select(Category).where(
+                is_active_column.is_(True),
+                embedding_column.isnot(None),
+            )
+        )
+        categories = result.scalars().all()
+
+        if not categories:
+            logger.info("No categories with embeddings — skipping classification")
+            return []
+
+        # Compute cosine similarity for each category
+        scores: list[dict[str, Any]] = []
+        for cat in categories:
+            cat_embedding = json.loads(cat.embedding)
+            score = self._cosine_similarity(file_embedding, cat_embedding)
+            scores.append({
+                "category_id": cat.id,
+                "name": cat.name,
+                "destination_path": cat.destination_path,
+                "score": round(float(score), 4),
+            })
+
+        # Sort descending and trim
+        scores.sort(key=lambda s: s["score"], reverse=True)
+        scores = scores[: settings.classification_top_k]
+
+        # Persist scores to DB
+        await self._save_scores(file_id, scores, db)
+
+        return scores
+
     async def classify(
         self,
         file_id: str,
@@ -52,41 +113,8 @@ class ClassificationService:
             logger.warning("No embedding for %s — skipping classification", file_path)
             return []
 
-        # 2. Load active categories with embeddings
-        is_active_column = getattr(Category, "is_active")
-        embedding_column = getattr(Category, "embedding")
-        result = await db.execute(
-            select(Category).where(
-                is_active_column.is_(True),
-                embedding_column.isnot(None),
-            )
-        )
-        categories = result.scalars().all()
-
-        if not categories:
-            logger.info("No categories with embeddings — skipping classification")
-            return []
-
-        # 3. Compute cosine similarity for each category
-        scores: list[dict[str, Any]] = []
-        for cat in categories:
-            cat_embedding = json.loads(cat.embedding)
-            score = self._cosine_similarity(file_embedding, cat_embedding)
-            scores.append({
-                "category_id": cat.id,
-                "name": cat.name,
-                "destination_path": cat.destination_path,
-                "score": round(float(score), 4),
-            })
-
-        # 4. Sort descending and trim
-        scores.sort(key=lambda s: s["score"], reverse=True)
-        scores = scores[: settings.classification_top_k]
-
-        # 5. Persist scores to DB
-        await self._save_scores(file_id, scores, db)
-
-        return scores
+        # 2-5. Score + persist
+        return await self.classify_with_embedding(file_id, file_embedding, db)
 
     # ── Embedding helpers ────────────────────────────────────────────────
 

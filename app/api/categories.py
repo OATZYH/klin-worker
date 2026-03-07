@@ -1,21 +1,27 @@
 """
-Categories API router.
+Categories API router (V3).
 
-CRUD endpoints for user-defined categories.
-Each category has a name, description, color, and optional destination path.
-When description changes, the embedding is regenerated automatically.
+CRUD + batch endpoints for user-defined categories.
+Mounted at: /api/categories
+
+V3 changes vs. settings/categories:
+  • Moved from /api/settings/categories → /api/categories
+  • Field renames: is_active → enabled, destination_path → folder_path
+  • Added `learning` field (bool: has AI classified at least one file into this category?)
+  • Added POST /batch for bulk creation
+  • POST and PATCH return 201/204 with no response body
 """
 
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import select
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import Category
+from app.db.models import Category, CategoryScore
 from app.db.session import get_db
-from app.models.request import CategoryCreate, CategoryUpdate
+from app.models.request import BatchCategoryCreate, CategoryCreate, CategoryUpdate
 from app.models.response import CategoryResponse
 from app.services.classification_service import ClassificationService
 from app.services.rag_service import RagService
@@ -42,20 +48,29 @@ def _get_classifier(rag: RagService = Depends(_get_rag)) -> ClassificationServic
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-def _to_response(cat: Category) -> CategoryResponse:
+def _to_response(cat: Category, learning: bool = False) -> CategoryResponse:
     return CategoryResponse(
         id=cat.id,
         name=cat.name,
         description=cat.description,
-        keywords_text=cat.keywords_text,
         color=cat.color,
-        destination_path=cat.destination_path,
-        is_path_manual=cat.is_path_manual,
-        is_default=cat.is_default,
-        is_active=cat.is_active,
-        created_at=cat.created_at,
+        enabled=cat.is_active,
+        folder_path=cat.destination_path,
+        learning=learning,
         updated_at=cat.updated_at,
     )
+
+
+async def _generate_embedding(
+    cat: Category,
+    classifier: ClassificationService,
+) -> str | None:
+    """Generate embedding JSON string for a category."""
+    embed_text = _build_embed_text(cat)
+    embedding_vec = await classifier.generate_category_embedding(embed_text)
+    if embedding_vec:
+        return json.dumps(embedding_vec)
+    return None
 
 
 # ── Routes ───────────────────────────────────────────────────────────────
@@ -71,41 +86,50 @@ async def list_categories(
     if active_only:
         stmt = stmt.where(Category.is_active.is_(True))
     result = await db.execute(stmt)
-    return [_to_response(c) for c in result.scalars().all()]
+    categories = result.scalars().all()
+
+    # Whether AI has ever classified a file into each category
+    cat_ids = [c.id for c in categories]
+    learning_map: dict[str, bool] = {}
+    if cat_ids:
+        count_stmt = (
+            select(CategoryScore.category_id, func.count(CategoryScore.id))
+            .where(CategoryScore.category_id.in_(cat_ids))  # type: ignore[union-attr]
+            .group_by(CategoryScore.category_id)
+        )
+        count_result = await db.execute(count_stmt)
+        for cat_id, cnt in count_result.all():
+            learning_map[cat_id] = cnt > 0
+
+    return [_to_response(c, learning=learning_map.get(c.id, False)) for c in categories]
 
 
-@router.post("", response_model=CategoryResponse, status_code=201)
+@router.post("", status_code=201)
 async def create_category(
     body: CategoryCreate,
     db: AsyncSession = Depends(get_db),
     classifier: ClassificationService = Depends(_get_classifier),
-) -> CategoryResponse:
-    """Create a new category and generate its embedding."""
+) -> Response:
+    """Create a new category and generate its embedding. No response body."""
     # Check uniqueness
     existing = await db.execute(select(Category).where(Category.name == body.name))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Category '{body.name}' already exists.")
 
-    # Generate embedding from name + description + keywords
-    embedding = None
     cat = Category(
         name=body.name,
         description=body.description,
-        keywords_text=body.keywords_text,
-        color=body.color,
-        destination_path=body.destination_path,
+        is_active=body.enabled,
+        destination_path=body.folder_path,
+        color=body.color or "#6366f1",
     )
-    embed_text = _build_embed_text(cat)
-    embedding_vec = await classifier.generate_category_embedding(embed_text)
-    if embedding_vec:
-        embedding = json.dumps(embedding_vec)
+    cat.embedding = await _generate_embedding(cat, classifier)
 
-    cat.embedding = embedding
     db.add(cat)
     await db.flush()
+    logger.info("Created category: %s (embedding=%s)", cat.name, cat.embedding is not None)
 
-    logger.info("Created category: %s (embedding=%s)", cat.name, embedding is not None)
-    return _to_response(cat)
+    return Response(status_code=201)
 
 
 @router.get("/{category_id}", response_model=CategoryResponse)
@@ -117,21 +141,26 @@ async def get_category(
     cat = await db.get(Category, category_id)
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found.")
-    return _to_response(cat)
+
+    # Compute learning
+    count_result = await db.execute(
+        select(func.count(CategoryScore.id)).where(
+            CategoryScore.category_id == category_id
+        )
+    )
+    learning = count_result.scalar_one() > 0
+
+    return _to_response(cat, learning=learning)
 
 
-@router.patch("/{category_id}", response_model=CategoryResponse)
+@router.patch("/{category_id}", status_code=204)
 async def update_category(
     category_id: str,
     body: CategoryUpdate,
     db: AsyncSession = Depends(get_db),
     classifier: ClassificationService = Depends(_get_classifier),
-) -> CategoryResponse:
-    """
-    Update a category.
-
-    If `name` or `description` changes, the embedding is regenerated.
-    """
+) -> Response:
+    """Update a category. No response body."""
     cat = await db.get(Category, category_id)
     if not cat:
         raise HTTPException(status_code=404, detail="Category not found.")
@@ -139,25 +168,27 @@ async def update_category(
     need_re_embed = False
     update_data = body.model_dump(exclude_unset=True)
 
-    # If user explicitly sets destination_path, mark as manual
-    if "destination_path" in update_data and update_data["destination_path"] is not None:
-        cat.is_path_manual = True
+    # Map V3 fields → DB columns
+    field_map = {"enabled": "is_active", "folder_path": "destination_path"}
 
     for field, value in update_data.items():
-        setattr(cat, field, value)
-        if field in ("name", "description", "keywords_text"):
+        db_field = field_map.get(field, field)
+
+        # If user explicitly sets folder_path, mark as manual
+        if field == "folder_path" and value is not None:
+            cat.is_path_manual = True
+
+        setattr(cat, db_field, value)
+        if db_field in ("name", "description"):
             need_re_embed = True
 
-    # Regenerate embedding when text changes
     if need_re_embed:
-        embed_text = _build_embed_text(cat)
-        embedding_vec = await classifier.generate_category_embedding(embed_text)
-        if embedding_vec:
-            cat.embedding = json.dumps(embedding_vec)
+        cat.embedding = await _generate_embedding(cat, classifier)
 
     await db.flush()
     logger.info("Updated category: %s (re-embed=%s)", cat.name, need_re_embed)
-    return _to_response(cat)
+
+    return Response(status_code=204)
 
 
 @router.delete("/{category_id}", status_code=204)
@@ -171,3 +202,35 @@ async def delete_category(
         raise HTTPException(status_code=404, detail="Category not found.")
     await db.delete(cat)
     logger.info("Deleted category: %s", cat.name)
+
+
+@router.post("/batch", status_code=201)
+async def batch_create_categories(
+    body: BatchCategoryCreate,
+    db: AsyncSession = Depends(get_db),
+    classifier: ClassificationService = Depends(_get_classifier),
+) -> Response:
+    """Batch create categories. No response body."""
+    created = 0
+    for item in body.categories:
+        # Skip duplicates silently
+        existing = await db.execute(select(Category).where(Category.name == item.name))
+        if existing.scalar_one_or_none():
+            logger.info("Batch: skipping duplicate category '%s'", item.name)
+            continue
+
+        cat = Category(
+            name=item.name,
+            description=item.description,
+            is_active=item.enabled,
+            destination_path=item.folder_path,
+            color=item.color or "#6366f1",
+        )
+        cat.embedding = await _generate_embedding(cat, classifier)
+        db.add(cat)
+        created += 1
+
+    await db.flush()
+    logger.info("Batch created %d categories", created)
+
+    return Response(status_code=201)

@@ -27,27 +27,24 @@ class FileScanResult(BaseModel):
 
 
 class CategoryResponse(BaseModel):
-    """Single category returned to the frontend."""
+    """Single category returned to the frontend (V3)."""
 
     id: str
     name: str
     description: str
-    keywords_text: Optional[str] = None
     color: str
-    destination_path: Optional[str] = None
-    is_path_manual: bool = False
-    is_default: bool = False
-    is_active: bool
-    created_at: datetime
+    enabled: bool
+    folder_path: Optional[str] = None
+    learning: bool = False
     updated_at: datetime
 
 
 class CategoryScoreResponse(BaseModel):
-    """A single category ↔ file score."""
+    """A single category ↔ file score (percentage 0-100)."""
 
     category_id: str
     name: str
-    score: float
+    score: float = Field(description="Confidence percentage (0-100)")
 
 
 # ── Organize ─────────────────────────────────────────────────────────────
@@ -56,47 +53,44 @@ class CategoryScoreResponse(BaseModel):
 class FileAnalysisResponse(BaseModel):
     """AI-generated analysis of a single file."""
 
-    summary: Optional[str] = None
-    suggested_name: Optional[str] = None
-
-
-class TopCategoryResponse(BaseModel):
-    """The winning category for a file."""
-
-    category_id: str
-    name: str
-    score: float
-    destination_path: Optional[str] = None
+    suggested_names: list[str] = Field(default_factory=list)
 
 
 class OrganizeFileResult(BaseModel):
     """Per-file result returned from POST /api/organize."""
 
-    filepath: str
     file_id: str
     analysis: FileAnalysisResponse
     categories: list[CategoryScoreResponse]
-    top_category: Optional[TopCategoryResponse] = None
     error: Optional[str] = None
 
 
 class OrganizeResponse(BaseModel):
     """Response for POST /api/organize."""
 
-    results: list[OrganizeFileResult]
+    results: dict[str, OrganizeFileResult]
 
 
 # ── History ──────────────────────────────────────────────────────────────
 
 
 class HistoryLogResponse(BaseModel):
-    """Single audit log entry."""
+    """Single audit log entry (V3)."""
 
     id: str
     file_id: str
     action: str
-    metadata: Optional[dict[str, Any]] = None
+    categories: list[CategoryScoreResponse] = Field(default_factory=list)
+    current_category: Optional[str] = None
+    original_path: Optional[str] = None
+    moved_path: Optional[str] = None
     created_at: datetime
+
+
+class HistoryListResponse(BaseModel):
+    """Wrapped history response for V3."""
+
+    results: list[HistoryLogResponse]
 
 
 # ── Settings ────────────────────────────────────────────────────────────

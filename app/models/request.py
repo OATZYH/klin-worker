@@ -12,15 +12,19 @@ class OrganizeRequest(BaseModel):
     """
     POST /api/organize request body.
 
-    `filepaths` contains **absolute** file paths sent from the Tauri frontend.
+    `file_paths` contains **absolute** file paths sent from the Tauri frontend.
     No file upload — only local path references.
     """
 
-    filepaths: list[str] = Field(
+    file_paths: list[str] = Field(
         ...,
         min_length=1,
         description="List of absolute file paths to analyse.",
         examples=[["/Users/sarun/Downloads/doc1.pdf"]],
+    )
+    force: bool = Field(
+        default=False,
+        description="Force re-processing even if file is unchanged and cached.",
     )
 
 
@@ -31,15 +35,20 @@ class CategoryCreate(BaseModel):
     """Create a new user-defined category."""
 
     name: str = Field(..., min_length=1, max_length=100)
-    description: str = Field(default="", max_length=500)
-    keywords_text: str | None = Field(
-        default=None,
-        description="Semantic keywords blob (EN + TH) for embedding generation.",
+    description: str = Field(
+        default="",
+        max_length=2000,
+        description="Free-form category meaning. Can contain natural language plus comma-separated keywords or phrases.",
     )
-    color: str = Field(default="#6366f1", pattern=r"^#[0-9a-fA-F]{6}$")
-    destination_path: str | None = Field(
+    enabled: bool = Field(default=True)
+    folder_path: str | None = Field(
         default=None,
         description="Absolute path where files of this category should be moved.",
+    )
+    color: str | None = Field(
+        default=None,
+        pattern=r"^#[0-9a-fA-F]{6}$",
+        description="Hex color code, e.g. #6366f1. Defaults to #6366f1 if not provided.",
     )
 
 
@@ -47,14 +56,20 @@ class CategoryUpdate(BaseModel):
     """Update an existing category (partial)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
-    description: str | None = Field(default=None, max_length=500)
-    keywords_text: str | None = Field(
+    description: str | None = Field(
         default=None,
-        description="Semantic keywords blob (EN + TH) for embedding generation.",
+        max_length=2000,
+        description="Free-form category meaning. Can contain natural language plus comma-separated keywords or phrases.",
     )
+    enabled: bool | None = None
+    folder_path: str | None = None
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
-    destination_path: str | None = None
-    is_active: bool | None = None
+
+
+class BatchCategoryCreate(BaseModel):
+    """Batch create categories."""
+
+    categories: list[CategoryCreate] = Field(..., min_length=1)
 
 
 # ── Settings ───────────────────────────────────────────────────────────

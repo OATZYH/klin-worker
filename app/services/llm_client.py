@@ -34,6 +34,7 @@ class LlmClient:
     def __init__(self) -> None:
         self._llm: Llama | None = None
         self._vision_supported: bool | None = None  # None = not yet tested
+        self._model_name: str = ""
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -68,11 +69,22 @@ class LlmClient:
             verbose=settings.llamacpp_verbose,
         )
 
+        # Detect vision capability from model filename
+        self._model_name = resolved.stem.lower()
+        _vision_keywords = ("vl", "vision", "multimodal", "mm")
+        if any(kw in self._model_name for kw in _vision_keywords):
+            self._vision_supported = True
+            logger.info("Vision-capable model detected: %s", resolved.name)
+        else:
+            self._vision_supported = False
+            logger.info("Text-only model detected: %s", resolved.name)
+
         logger.info(
-            "Model loaded  →  n_ctx=%d  n_embd=%d  n_gpu_layers=%d",
+            "Model loaded  →  n_ctx=%d  n_embd=%d  n_gpu_layers=%d  vision=%s",
             self._llm.n_ctx(),
             self._llm.n_embd(),
             settings.llamacpp_n_gpu_layers,
+            self._vision_supported,
         )
 
     def shutdown(self) -> None:

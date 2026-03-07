@@ -45,7 +45,6 @@ class Category(SQLModel, table=True):
     id: str = Field(default_factory=_new_uuid, primary_key=True)
     name: str = Field(nullable=False, unique=True)
     description: str = Field(default="", nullable=False)
-    keywords_text: Optional[str] = Field(default=None)  # Full text blob of semantic keywords
     color: str = Field(default="#6366f1", max_length=7, nullable=False)
     destination_path: Optional[str] = Field(default=None)
     is_path_manual: bool = Field(default=False, nullable=False)  # True when user set path manually
@@ -103,7 +102,8 @@ class FileAnalysis(SQLModel, table=True):
         unique=True,
     )
     summary: Optional[str] = Field(default=None)
-    suggested_name: Optional[str] = Field(default=None)
+    suggested_names: Optional[str] = Field(default=None)  # JSON-serialised list[str]
+    categories_hash: Optional[str] = Field(default=None)  # MD5 of active category semantics at analysis time
     processed_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
     # relationships

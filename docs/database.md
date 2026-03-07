@@ -22,7 +22,6 @@ erDiagram
         String id PK
         Text name UK "NOT NULL"
         Text description "NOT NULL"
-        Text keywords_text "NULLABLE, semantic keywords EN+TH"
         String color "NOT NULL, #6366f1"
         Text destination_path "NULLABLE"
         Boolean is_path_manual "NOT NULL, false"
@@ -46,7 +45,8 @@ erDiagram
         String id PK
         String file_id FK "NOT NULL, UNIQUE"
         Text summary "NULLABLE"
-        Text suggested_name "NULLABLE"
+        Text suggested_names "NULLABLE, JSON list[str]"
+      String categories_hash "NULLABLE, MD5 of active category semantics"
         DateTime processed_at "NOT NULL, UTC"
     }
 
@@ -88,10 +88,9 @@ erDiagram
 │ id (PK)      │       │ id (PK)         │──1:1──│ file_id (FK)     │
 │ name         │       │ original_path   │       │ id (PK)          │
 │ description  │       │ hash            │       │ summary          │
-│ keywords_text│       │ size            │       │ suggested_name   │
-│ color        │       │ extension       │       │ processed_at     │
-│ dest_path    │       │ created_at      │       └──────────────────┘
-│ is_path_manual│      └────────┬────────┘
+│ color        │       │ extension       │       │ categories_hash  │
+│ dest_path    │       │ created_at      │       │ processed_at     │
+│ is_path_manual│      └────────┬────────┘       └──────────────────┘
 │ embedding    │                │
 │ is_default   │                │ 1:N
 │ is_active    │                │
@@ -146,24 +145,23 @@ User-defined classification buckets. Each category has an embedding vector used 
 | ------------------ | ------------ | ----------------------- | ---------------- | -------------------------------------------- |
 | `id`               | `String`     | **PK**                  | UUID v4          | Unique identifier                            |
 | `name`             | `Text`       | NOT NULL, UNIQUE        | —                | Display name (e.g. "Invoices")               |
-| `description`      | `Text`       | NOT NULL                | `""`             | Human description used for embedding          |
-| `keywords_text`    | `Text`       | NULLABLE                | `NULL`           | Semantic keywords blob (EN + TH + doc hints). Combined with name + description for richer embeddings. |
+| `description`      | `Text`       | NOT NULL                | `""`             | Human description used for embedding. Can contain natural language plus comma-separated keywords or phrases. |
 | `color`            | `String(7)`  | NOT NULL                | `"#6366f1"`      | Hex color for UI display                     |
 | `destination_path` | `Text`       | NULLABLE                | `NULL`           | Target folder for organized files. Auto-set from `default_base_path/{name}` unless manual. |
 | `is_path_manual`   | `Boolean`    | NOT NULL                | `false`          | `true` when user explicitly set `destination_path`. Auto-update from base path is skipped. |
 | `embedding`        | `Text`       | NULLABLE                | `NULL`           | JSON-serialised float list (768-dim vector)  |
-| `is_default`       | `Boolean`    | NOT NULL                | `false`          | `true` for system-seeded categories (12 defaults). User-created categories are `false`. |
+| `is_default`       | `Boolean`    | NOT NULL                | `false`          | `true` for system-seeded categories. User-created categories are `false`. |
 | `is_active`        | `Boolean`    | NOT NULL                | `true`           | Soft-delete / disable toggle                 |
 | `created_at`       | `DateTime`   | NOT NULL                | UTC now          | Row creation timestamp                       |
 | `updated_at`       | `DateTime`   | NOT NULL                | UTC now          | Last modification timestamp (auto-updated)   |
 
 **Embedding source text:**
 
-The embedding vector is generated from `"{name}. {description}. {keywords_text}"` — combining all three fields gives the vector broad semantic coverage for classification. This is handled by `_build_embed_text()` in `seed_service.py`.
+The embedding vector is generated from `name + description`. The `description` field may include both natural-language guidance and keyword-style phrases for broader semantic coverage. This is handled by `_build_embed_text()` in `seed_service.py`.
 
 **Default categories:**
 
-12 categories are seeded via `PUT /api/settings/initial-base-path` (called by Tauri on first launch) using `seed_service.py` (idempotent — seeds when the categories table is empty OR when no `is_default=True` rows exist). Embeddings are generated in the same request if llama.cpp and RAG are ready.
+Default categories are seeded via `PUT /api/settings/initial-base-path` (called by Tauri on first launch) using `seed_service.py` (idempotent — seeds when the categories table is empty OR when no `is_default=True` rows exist). Embeddings are generated in the same request if llama.cpp and RAG are ready.
 
 **Relationships:**
 
@@ -194,15 +192,27 @@ Scanned file metadata. One row per unique file path.
 
 ### `file_analysis`
 
-AI-generated summary and rename suggestion for a file. One row per file.
+AI-generated summary and rename suggestions for a file. One row per file.
 
-| Column           | Type       | Constraints                      | Default  | Description                              |
-| ---------------- | ---------- | -------------------------------- | -------- | ---------------------------------------- |
-| `id`             | `String`   | **PK**                           | UUID v4  | Unique identifier                        |
-| `file_id`        | `String`   | **FK → files.id**, NOT NULL, UQ  | —        | Associated file                          |
-| `summary`        | `Text`     | NULLABLE                         | `NULL`   | One-paragraph AI-generated summary       |
-| `suggested_name` | `Text`     | NULLABLE                         | `NULL`   | AI-suggested descriptive filename        |
-| `processed_at`   | `DateTime` | NOT NULL                         | UTC now  | When the analysis was generated          |
+| Column            | Type       | Constraints                      | Default  | Description                                        |
+| ----------------- | ---------- | -------------------------------- | -------- | -------------------------------------------------- |
+| `id`              | `String`   | **PK**                           | UUID v4  | Unique identifier                                  |
+| `file_id`         | `String`   | **FK → files.id**, NOT NULL, UQ  | —        | Associated file                                    |
+| `summary`         | `Text`     | NULLABLE                         | `NULL`   | One-paragraph AI-generated summary                 |
+| `suggested_names` | `Text`     | NULLABLE                         | `NULL`   | JSON-serialised `list[str]` of filename suggestions |
+| `categories_hash` | `String`   | NULLABLE                         | `NULL`   | MD5 of active category semantics (`id + name + description`) at analysis time. `NULL` triggers a one-time re-classification. |
+| `processed_at`    | `DateTime` | NOT NULL                         | UTC now  | When the analysis was generated                    |
+
+**Cache invalidation:**
+
+The organize pipeline computes `MD5(sorted active category id:name:description tuples)` on every request and compares it to `categories_hash`:
+
+| `file_changed` | `categories_hash` matches | `force` | Result |
+|---|---|---|---|
+| `false` | ✅ yes | `false` | **Full hit** — return DB cache instantly (<150 ms) |
+| `false` | ❌ no / `NULL` | `false` | **Partial** — re-classify only (~2 s, no LLM summary call) |
+| `true` | any | any | **Full pipeline** (~5 s) |
+| any | any | `true` | **Full pipeline** (forced) |
 
 **Relationships:**
 
@@ -258,13 +268,10 @@ Append-only audit trail of every action performed on a file. Each entry captures
 
 ```json
 {
-  "top_category": "Education & Learning",
-  "top_score": 0.82,
-  "suggested_name": "Traditional_Chinese_Medicine_CM67.pdf",
+  "suggested_names": ["tcm_curriculum_cm67.pdf", "traditional_medicine_cm67.pdf"],
   "all_scores": [
-    { "category_id": "a1b2c3d4-...", "name": "Education & Learning", "score": 0.82 },
-    { "category_id": "e5f6g7h8-...", "name": "Documents", "score": 0.41 },
-    { "category_id": "i9j0k1l2-...", "name": "Photos", "score": 0.12 }
+    { "category_id": "a1b2c3d4-...", "name": "Education & Research", "score": 0.86 },
+    { "category_id": "e5f6g7h8-...", "name": "Health & Medical", "score": 0.82 }
   ]
 }
 ```
@@ -275,9 +282,7 @@ Append-only audit trail of every action performed on a file. Each entry captures
 
 ```json
 {
-  "top_category": null,
-  "top_score": 0.0,
-  "suggested_name": "Meeting_Notes_Feb_2026.docx",
+  "suggested_names": ["meeting_notes_feb_2026.docx"],
   "all_scores": []
 }
 ```
@@ -329,7 +334,9 @@ Append-only audit trail of every action performed on a file. Each entry captures
 
 | `action`             | เมื่อไหร่                    | `metadata_json` มีอะไร                        |
 | -------------------- | ---------------------------- | ---------------------------------------------- |
-| `organized`          | `/api/organize` สำเร็จ       | `top_category`, `top_score`, `suggested_name`, `all_scores[]` |
+| `organized`          | `/api/organize` สำเร็จ (full run) | `suggested_names[]`, `all_scores[]`       |
+| `organized_cached`   | `/api/organize` cache full hit | `suggested_names[]`                          |
+| `organized_reclassified` | `/api/organize` partial (categories changed) | `suggested_names[]`     |
 | `category_created`   | สร้าง category ใหม่           | `category_id`, `name`, `description`           |
 | `category_updated`   | แก้ไข category               | `category_id`, `changes`                       |
 | `category_deleted`   | ลบ category                  | `category_id`, `name`                          |
