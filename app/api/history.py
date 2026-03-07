@@ -146,24 +146,28 @@ async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
 
 @router.get("", response_model=HistoryListResponse)
 async def list_history(
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=20, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     action: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     history_svc: HistoryService = Depends(_get_history),
 ) -> HistoryListResponse:
-    """Get recent history entries, optionally filtered by action type."""
-    logs = await history_svc.get_recent(
+    """Get paginated recent history entries, optionally filtered by action and search."""
+    logs, has_more = await history_svc.get_recent_page(
         db,
         limit=limit,
+        offset=offset,
         action=action,
         actions=None if action else USER_ACTIONS,
+        search=search,
     )
 
     results = []
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results)
+    return HistoryListResponse(results=results, limit=limit, offset=offset, has_more=has_more)
 
 
 @router.get("/file/{file_id}", response_model=HistoryListResponse)
@@ -180,7 +184,7 @@ async def get_file_history(
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results)
+    return HistoryListResponse(results=results, limit=limit, offset=0, has_more=False)
 
 
 @router.get("/list")

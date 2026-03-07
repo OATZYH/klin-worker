@@ -105,6 +105,9 @@ class HistoryListResponse(BaseModel):
     """Wrapped history response for V3."""
 
     results: list[HistoryLogResponse]
+    limit: int = 0
+    offset: int = 0
+    has_more: bool = False
 
 
 # ── Settings ────────────────────────────────────────────────────────────
