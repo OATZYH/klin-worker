@@ -2,7 +2,7 @@
 Settings API package.
 
 Groups all configuration-related routers under /api/settings:
-  • /api/settings/categories       — CRUD for user-defined categories
+  • /api/settings/categories       — canonical CRUD + batch categories API
   • /api/settings/default-base-path — change base folder later
   • /api/settings/initial-base-path — Tauri startup: set base path + seed
 

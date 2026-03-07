@@ -8,8 +8,7 @@ FastAPI application entry point.
   • Health-check at /health
   • Organize API at /api/organize
   • Summary API at /api/summary
-  • Categories API at /api/categories (V3)
-  • Settings API at /api/settings (base path, init, legacy categories)
+    • Settings API at /api/settings (categories, base path, init)
   • History log at /api/history
 """
 
@@ -21,7 +20,6 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.categories import router as categories_router
 from app.api.history import router as history_router
 from app.api.organize import router as organize_router
 from app.api.settings import router as settings_router
@@ -151,7 +149,6 @@ app.add_middleware(
 # Routers
 app.include_router(organize_router)
 app.include_router(summary_router)
-app.include_router(categories_router)
 app.include_router(settings_router)
 app.include_router(history_router)
 
