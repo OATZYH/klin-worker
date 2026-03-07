@@ -7,6 +7,8 @@ Returns wrapped ``{"results": [...]}`` with enriched history entries.
 
 import json
 import logging
+from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlmodel import select
@@ -24,6 +26,49 @@ from app.services.history_service import HistoryService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/history", tags=["history"])
+
+
+MOCK_HISTORY_ITEMS: list[dict[str, Any]] = [
+    {
+        "id": "h1",
+        "type": "organize",
+        "title": "Invoice-2026-02.pdf",
+        "subtitle": "Moved to Finance",
+        "timestamp": datetime(2026, 3, 7, 5, 0, tzinfo=timezone.utc).isoformat(),
+        "fromPath": "C:/Users/supak/Downloads/Invoice-2026-02.pdf",
+        "toPath": "C:/Users/supak/Documents/KLIN/Finance/Invoice-2026-02.pdf",
+        "oldName": "invoice_2026_02.pdf",
+        "newName": "Invoice-2026-02.pdf",
+        "scores": [
+            {"name": "Finance", "score": 0.91},
+            {"name": "Work", "score": 0.06},
+            {"name": "Personal", "score": 0.03},
+        ],
+    },
+    {
+        "id": "h2",
+        "type": "summary",
+        "title": "Project-Alpha-Summary.md",
+        "subtitle": "Summary generated",
+        "timestamp": datetime(2026, 3, 7, 4, 20, tzinfo=timezone.utc).isoformat(),
+        "fileNames": ["meeting-notes.txt", "action-items.txt", "timeline.txt"],
+        "summaryPath": "C:/Users/supak/Documents/KLIN/Summaries/Project-Alpha-Summary.md",
+    },
+    {
+        "id": "h3",
+        "type": "calendar",
+        "title": "Project Alpha Weekly Sync",
+        "subtitle": "Calendar event found in notes",
+        "timestamp": datetime(2026, 3, 7, 3, 45, tzinfo=timezone.utc).isoformat(),
+        "foundInFile": True,
+        "sourceFileName": "meeting-notes.txt",
+        "meetingTitle": "Project Alpha Weekly Sync",
+        "meetingTime": "2026-03-08 10:00",
+        "meetingLocation": "Microsoft Teams",
+        "details": "Review sprint progress and pending blockers.",
+        "actionLabel": "Add to calendar",
+    },
+]
 
 
 # ── Dependency Injection ─────────────────────────────────────────────────
@@ -114,3 +159,10 @@ async def get_file_history(
         results.append(await _enrich_log(log, db))
 
     return HistoryListResponse(results=results)
+
+
+@router.get("/list")
+async def get_mock_history_list() -> dict[str, list[dict[str, Any]]]:
+    """Return UI-ready mock history rows for frontend development/testing."""
+
+    return {"items": MOCK_HISTORY_ITEMS}

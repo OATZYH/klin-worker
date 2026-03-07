@@ -131,3 +131,14 @@ class FileSearchResponse(BaseModel):
     """Response for POST /api/search/files."""
 
     results: list[FileSearchResultItem]
+
+
+# ── Notes ────────────────────────────────────────────────────────────────
+
+
+class NotesSummarizeResponse(BaseModel):
+    """Response for POST /api/notes/summarize."""
+
+    summary: str
+    suggested_title: str | None = None
+    processing_time_ms: int | None = None

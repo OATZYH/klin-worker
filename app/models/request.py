@@ -113,3 +113,21 @@ class FileSearchRequest(BaseModel):
         description="Search keyword used to match file metadata.",
         examples=["invoice"],
     )
+
+
+# ── Notes ────────────────────────────────────────────────────────────────
+
+
+class NotesSummarizeRequest(BaseModel):
+    """POST /api/notes/summarize request body."""
+
+    filePaths: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Absolute file paths to summarize.",
+        examples=[["/Users/sarun/Downloads/meeting-notes.txt"]],
+    )
+    context: str | None = Field(
+        default=None,
+        description="Optional user-provided context for summary generation.",
+    )

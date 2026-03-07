@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.categories import router as categories_router
 from app.api.history import router as history_router
+from app.api.notes import router as notes_router
 from app.api.organize import router as organize_router
 from app.api.search import router as search_router
 from app.api.settings import router as settings_router
@@ -156,6 +157,7 @@ app.include_router(categories_router)
 app.include_router(settings_router)
 app.include_router(history_router)
 app.include_router(search_router)
+app.include_router(notes_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────
