@@ -3,7 +3,7 @@ Response models for the Klin-Worker API.
 """
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,14 @@ class CategoryScoreResponse(BaseModel):
     score: float = Field(description="Confidence percentage (0-100)")
 
 
+class SelectedCategoryScoreResponse(BaseModel):
+    """Category selected by the user for a confirmed action."""
+
+    id: str
+    name: str
+    score: float | None = Field(default=None, description="Confidence percentage (0-100)")
+
+
 # ── Organize ─────────────────────────────────────────────────────────────
 
 
@@ -71,6 +79,12 @@ class OrganizeResponse(BaseModel):
     results: dict[str, OrganizeFileResult]
 
 
+class ApplyOrganizeDecisionResponse(BaseModel):
+    """Minimal success response for POST /api/organize/apply."""
+
+    success: bool = True
+
+
 # ── History ──────────────────────────────────────────────────────────────
 
 
@@ -80,10 +94,10 @@ class HistoryLogResponse(BaseModel):
     id: str
     file_id: str
     action: str
-    categories: list[CategoryScoreResponse] = Field(default_factory=list)
-    current_category: Optional[str] = None
+    file_name: str
+    category: SelectedCategoryScoreResponse | None = None
     original_path: Optional[str] = None
-    moved_path: Optional[str] = None
+    new_path: Optional[str] = None
     created_at: datetime
 
 

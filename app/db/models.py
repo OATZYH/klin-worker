@@ -8,6 +8,7 @@ Tables:
   • file_analysis     — AI summary + rename suggestion per file
   • category_scores   — AI classification score per file×category
   • history_logs      — audit trail of every action
+    • system_logs       — operational / application log events
 """
 
 import uuid
@@ -69,6 +70,7 @@ class File(SQLModel, table=True):
 
     id: str = Field(default_factory=_new_uuid, primary_key=True)
     original_path: str = Field(nullable=False, unique=True)
+    current_path: str = Field(nullable=False, unique=True)
     hash: str = Field(max_length=64, nullable=False)
     size: int = Field(nullable=False)
     extension: str = Field(max_length=32, nullable=False)
@@ -140,3 +142,19 @@ class HistoryLog(SQLModel, table=True):
 
     # relationships
     file: Optional["File"] = Relationship(back_populates="history")
+
+
+# ── System Logs ─────────────────────────────────────────────────────────
+
+
+class SystemLog(SQLModel, table=True):
+    __tablename__ = "system_logs"  # type: ignore[assignment]
+
+    id: str = Field(default_factory=_new_uuid, primary_key=True)
+    level: str = Field(max_length=16, nullable=False)
+    component: str = Field(max_length=64, nullable=False)
+    event_type: str = Field(max_length=64, nullable=False)
+    message: str = Field(nullable=False)
+    context_json: Optional[str] = Field(default=None)  # JSON string
+    correlation_id: Optional[str] = Field(default=None, max_length=64)
+    created_at: datetime = Field(default_factory=_utcnow, nullable=False)

@@ -19,6 +19,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.history import router as history_router
 from app.api.notes import router as notes_router
@@ -28,12 +29,14 @@ from app.api.settings import router as settings_router
 from app.api.summary import router as summary_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
+from app.db.session import engine
 from app.services.background_ingest import ingest_worker
 from app.services.classification_service import ClassificationService
 from app.services.llm_client import llm_client
 from app.services.rag_service import RagService
 from app.services.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
+from app.services.system_log_service import SystemLogService
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
@@ -46,6 +49,7 @@ logger = logging.getLogger(__name__)
 # ── Shared service instances ─────────────────────────────────────────────
 
 _rag_service = RagService()
+_system_log_service = SystemLogService()
 
 
 def get_rag_service() -> RagService:
@@ -56,6 +60,51 @@ def get_rag_service() -> RagService:
 # ── Startup check results (populated in lifespan, read by /health) ───────
 
 _startup_checks: list[CheckResult] = []
+
+
+async def _write_system_log(
+    *,
+    level: str,
+    event_type: str,
+    message: str,
+    context: dict | None = None,
+) -> None:
+    """Persist a lifecycle / operational event without breaking the app."""
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            await _system_log_service.log(
+                db=db,
+                level=level,
+                component="app.lifecycle",
+                event_type=event_type,
+                message=message,
+                context=context,
+            )
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "Failed to persist system log event '%s'.",
+            event_type,
+            exc_info=True,
+        )
+
+
+async def _cleanup_system_logs() -> int:
+    """Delete old system logs based on retention settings."""
+    if not settings.cleanup_system_logs_on_startup:
+        return 0
+
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            deleted_count = await _system_log_service.cleanup_old_logs(
+                db,
+                retention_days=settings.system_log_retention_days,
+            )
+            await db.commit()
+            return deleted_count
+    except Exception:
+        logger.warning("System log cleanup failed.", exc_info=True)
+        return 0
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────
@@ -72,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── 2. Initialise SQLite (run Alembic migrations) ────────────────
     await run_migrations()
+    cleaned_system_logs = await _cleanup_system_logs()
 
     # ── 3. Load GGUF model in-process (llama-cpp-python) ─────────────
     try:
@@ -82,6 +132,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "the API will work without AI features.",
             exc_info=True,
         )
+        await _write_system_log(
+            level="WARNING",
+            event_type="llm_startup_failed",
+            message="llama-cpp-python model failed to load at startup.",
+            context={"component": "llm_client"},
+        )
 
     # ── 4. Initialise RAG-Anything (heavy — do it once) ──────────────
     try:
@@ -90,6 +146,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning(
             "RAG-Anything failed to initialise — "
             "the API will work without semantic features."
+        )
+        await _write_system_log(
+            level="WARNING",
+            event_type="rag_startup_failed",
+            message="RAG service failed to initialize at startup.",
+            context={"component": "rag_service"},
         )
 
     # ── 4b. Start background ingest worker ───────────────────────
@@ -101,11 +163,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "Background ingest worker failed to start.",
                 exc_info=True,
             )
+            await _write_system_log(
+                level="WARNING",
+                event_type="ingest_worker_start_failed",
+                message="Background ingest worker failed to start.",
+                context={"component": "background_ingest"},
+            )
 
     # ── 5. Run startup checks (DB, llama-cpp-python, RAG) ───────────
     try:
-        from app.db.session import AsyncSession, engine
-
         async with AsyncSession(engine, expire_on_commit=False) as db:
             if _rag_service.is_ready and llm_client.is_loaded:
                 classifier = ClassificationService(_rag_service)
@@ -119,6 +185,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _startup_checks = await run_all_checks(db, _rag_service)
     except Exception:
         logger.warning("Startup checks failed to execute.", exc_info=True)
+        await _write_system_log(
+            level="WARNING",
+            event_type="startup_checks_failed",
+            message="Startup checks failed to execute.",
+            context={"component": "startup_checks"},
+        )
+
+    startup_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
+    await _write_system_log(
+        level="INFO" if startup_ok else "WARNING",
+        event_type="app_startup",
+        message="Application startup completed.",
+        context={
+            "version": settings.app_version,
+            "rag_ready": _rag_service.is_ready,
+            "llm_loaded": llm_client.is_loaded,
+            "cleaned_system_logs": cleaned_system_logs,
+            "checks": {
+                result.name: {"ok": result.ok, "detail": result.detail}
+                for result in _startup_checks
+            },
+        },
+    )
 
     # NOTE: Category seeding is done via PUT /api/settings/initial-base-path,
     # which the Tauri frontend calls on launch.
@@ -128,6 +217,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Shutdown ─────────────────────────────────────────────────────
     await ingest_worker.stop()
     llm_client.shutdown()
+    await _write_system_log(
+        level="INFO",
+        event_type="app_shutdown",
+        message="Application shutdown completed.",
+        context={
+            "version": settings.app_version,
+            "rag_ready": _rag_service.is_ready,
+        },
+    )
     logger.info("👋  Shutting down %s", settings.app_name)
 
 
