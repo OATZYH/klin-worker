@@ -26,15 +26,22 @@ import json
 import logging
 import time
 from collections import defaultdict
+from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import Category, CategoryScore, File, FileAnalysis
 from app.db.session import get_db
-from app.models.request import OrganizeRequest
+from app.models.request import (
+    ApplyOrganizeDecisionRequest,
+    ApplySelectedCategoryRequest,
+    OrganizeRequest,
+)
 from app.models.response import (
+    ApplyOrganizeDecisionResponse,
     CategoryScoreResponse,
     FileAnalysisResponse,
     OrganizeFileResult,
@@ -47,6 +54,7 @@ from app.services.rag_service import RagService
 from app.services.rename_service import RenameService
 from app.services.scanner_service import ScannerService
 from app.services.summary_service import SummaryService
+from app.services.system_log_service import SystemLogService
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +94,85 @@ def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 2)
 
 
+async def _get_file_by_current_path(db: AsyncSession, file_path: str) -> File | None:
+    """Look up a file row by its current known path."""
+    current_path_column = getattr(File, "current_path")
+    result = await db.execute(select(File).where(current_path_column == file_path))
+    return result.scalar_one_or_none()
+
+
+def _build_category_responses(
+    scores: list[dict[str, Any]],
+) -> list[CategoryScoreResponse]:
+    """Convert raw cosine scores to API percentage responses."""
+    return [
+        CategoryScoreResponse(
+            category_id=str(score["category_id"]),
+            name=str(score["name"]),
+            score=round(float(score["score"]) * 100, 1),
+        )
+        for score in scores
+    ]
+
+
+def _build_history_metadata(
+    *,
+    suggested_names: list[str],
+    scores: list[dict[str, Any]],
+    pipeline: dict[str, str | bool | None],
+    timings: dict[str, float],
+) -> dict[str, Any]:
+    """Build a stable history payload for all organize event variants."""
+    return {
+        "suggested_names": suggested_names,
+        "all_scores": [
+            {
+                "category_id": str(score["category_id"]),
+                "name": str(score["name"]),
+                "score": float(score["score"]),
+            }
+            for score in scores
+        ],
+        "pipeline": dict(pipeline),
+        "timings": dict(timings),
+    }
+
+
+async def _log_pipeline_issue(
+    *,
+    db: AsyncSession,
+    system_log_svc: SystemLogService,
+    level: str,
+    event_type: str,
+    message: str,
+    filepath: str,
+    file_id: str | None = None,
+    error: str | None = None,
+    pipeline: dict[str, str | bool | None] | None = None,
+    timings: dict[str, float] | None = None,
+) -> None:
+    """Persist an operational warning/error for troubleshooting."""
+    context: dict[str, Any] = {"filepath": filepath}
+    if file_id:
+        context["file_id"] = file_id
+    if error:
+        context["error"] = error
+    if pipeline:
+        context["pipeline"] = dict(pipeline)
+    if timings:
+        context["timings"] = dict(timings)
+
+    await system_log_svc.log(
+        db=db,
+        level=level,
+        component="organize.pipeline",
+        event_type=event_type,
+        message=message,
+        context=context,
+        correlation_id=file_id,
+    )
+
+
 # ── Dependency Injection ─────────────────────────────────────────────────
 
 
@@ -115,6 +202,82 @@ def _get_history() -> HistoryService:
     return HistoryService()
 
 
+def _get_system_log() -> SystemLogService:
+    return SystemLogService()
+
+
+def _normalize_selected_file_name(
+    *,
+    selected_name: str | None,
+    fallback_name: str,
+    expected_extension: str,
+) -> str:
+    """Normalize the user-selected file name without touching the file system."""
+    candidate = (selected_name or fallback_name).strip()
+    if not candidate:
+        raise ValueError("Selected file name must not be empty.")
+
+    pure_name = Path(candidate).name
+    if pure_name in {"", ".", ".."}:
+        raise ValueError("Selected file name is invalid.")
+
+    if expected_extension and not pure_name.lower().endswith(expected_extension.lower()):
+        pure_name = f"{pure_name}{expected_extension}"
+
+    return pure_name
+
+
+def _build_logged_user_action_result(
+    *,
+    current_path: str,
+    selected_name: str | None,
+    destination_dir: str | None,
+    expected_extension: str,
+) -> dict[str, str | bool | None]:
+    """Build the intended rename/move result for history tracking only."""
+    source_path = Path(current_path).resolve()
+    final_name = _normalize_selected_file_name(
+        selected_name=selected_name,
+        fallback_name=source_path.name,
+        expected_extension=expected_extension,
+    )
+    target_dir = Path(destination_dir).resolve() if destination_dir else source_path.parent
+    final_path = (target_dir / final_name).resolve()
+    renamed = final_name != source_path.name
+    moved = final_path.parent != source_path.parent
+
+    return {
+        "source_path": str(source_path),
+        "final_path": str(final_path),
+        "file_name": final_name,
+        "renamed": renamed,
+        "moved": moved,
+        "new_path": str(final_path) if renamed or moved else None,
+    }
+
+
+def _build_user_action_history_metadata(
+    *,
+    file_name: str,
+    source_path: str,
+    selected_category: ApplySelectedCategoryRequest | None,
+    new_path: str | None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "file_name": file_name,
+        "source_path": source_path,
+    }
+    if selected_category:
+        metadata["selected_category"] = {
+            "id": selected_category.id,
+            "name": selected_category.name,
+            "score": selected_category.score,
+        }
+    if new_path:
+        metadata["new_path"] = new_path
+    return metadata
+
+
 # ── Route ────────────────────────────────────────────────────────────────
 
 
@@ -128,6 +291,7 @@ async def organize_files(
     summary_svc: SummaryService = Depends(_get_summary),
     rename_svc: RenameService = Depends(_get_rename),
     history_svc: HistoryService = Depends(_get_history),
+    system_log_svc: SystemLogService = Depends(_get_system_log),
 ) -> OrganizeResponse:
     """
     Analyse and classify the given file paths.
@@ -162,10 +326,80 @@ async def organize_files(
             summary_svc=summary_svc,
             rename_svc=rename_svc,
             history_svc=history_svc,
+            system_log_svc=system_log_svc,
         )
         results[filepath] = result
 
     return OrganizeResponse(results=results)
+
+
+@router.post("/organize/apply", response_model=ApplyOrganizeDecisionResponse)
+async def apply_organize_decision(
+    body: ApplyOrganizeDecisionRequest,
+    db: AsyncSession = Depends(get_db),
+    history_svc: HistoryService = Depends(_get_history),
+) -> ApplyOrganizeDecisionResponse:
+    """Record a user-confirmed rename and/or move after analysis."""
+    file_record = await db.get(File, body.file_id)
+    if not file_record:
+        raise HTTPException(status_code=404, detail="File not found.")
+
+    current_path = getattr(file_record, "current_path")
+    current_file = Path(current_path)
+    current_extension = file_record.extension or current_file.suffix.lower()
+
+    selected_category = body.selected_category
+    selected_category_record: Category | None = None
+    destination_dir: str | None = None
+    if selected_category:
+        selected_category_record = await db.get(Category, selected_category.id)
+        if not selected_category_record:
+            raise HTTPException(status_code=404, detail="Selected category not found.")
+        if not selected_category_record.is_active:
+            raise HTTPException(status_code=400, detail="Selected category is disabled.")
+        if not selected_category_record.destination_path:
+            raise HTTPException(status_code=400, detail="Selected category has no destination folder.")
+        destination_dir = selected_category_record.destination_path
+
+    try:
+        result = _build_logged_user_action_result(
+            current_path=current_path,
+            selected_name=body.selected_name,
+            destination_dir=destination_dir,
+            expected_extension=current_extension,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    renamed = bool(result["renamed"])
+    moved = bool(result["moved"])
+    if renamed and moved:
+        action = "renamed_moved"
+    elif moved:
+        action = "moved"
+    elif renamed:
+        action = "renamed"
+    else:
+        raise HTTPException(status_code=400, detail="No confirmed file change was applied.")
+
+    final_path = str(result["final_path"])
+    file_record.current_path = final_path
+    file_record.extension = Path(final_path).suffix.lower() or file_record.extension
+
+    metadata = _build_user_action_history_metadata(
+        file_name=str(result["file_name"]),
+        source_path=str(result["source_path"]),
+        selected_category=selected_category,
+        new_path=str(result["new_path"]) if result["new_path"] else None,
+    )
+    await history_svc.log(
+        db=db,
+        file_id=file_record.id,
+        action=action,
+        metadata=metadata,
+    )
+
+    return ApplyOrganizeDecisionResponse()
 
 
 # ── Per-file processing ──────────────────────────────────────────────────
@@ -181,6 +415,7 @@ async def _process_single_file(
     summary_svc: SummaryService,
     rename_svc: RenameService,
     history_svc: HistoryService,
+    system_log_svc: SystemLogService,
 ) -> OrganizeFileResult:
     """
     Process a single file through the optimised AI pipeline.
@@ -199,6 +434,7 @@ async def _process_single_file(
             summary_svc=summary_svc,
             rename_svc=rename_svc,
             history_svc=history_svc,
+            system_log_svc=system_log_svc,
         )
 
 
@@ -212,6 +448,7 @@ async def _process_single_file_inner(
     summary_svc: SummaryService,
     rename_svc: RenameService,
     history_svc: HistoryService,
+    system_log_svc: SystemLogService,
 ) -> OrganizeFileResult:
     """Core pipeline — assumes caller holds the per-file lock."""
     total_started_at = time.perf_counter()
@@ -231,6 +468,17 @@ async def _process_single_file_inner(
 
     if scan.error:
         timings["total_ms"] = _elapsed_ms(total_started_at)
+        await _log_pipeline_issue(
+            db=db,
+            system_log_svc=system_log_svc,
+            level="WARNING",
+            event_type="organize_scan_failed",
+            message="File scan failed during organize pipeline.",
+            filepath=filepath,
+            error=scan.error,
+            pipeline=pipeline,
+            timings=timings,
+        )
         logger.warning(
             "Organize failed | file=%s | error=%s | timings=%s",
             filepath,
@@ -246,10 +494,7 @@ async def _process_single_file_inner(
 
     # ── Step 2: Upsert file record ───────────────────────────────────
     step_started_at = time.perf_counter()
-    existing = await db.execute(
-        select(File).where(File.original_path == scan.original_path)
-    )
-    file_record = existing.scalar_one_or_none()
+    file_record = await _get_file_by_current_path(db, scan.original_path)
 
     is_new_file = False
     previous_hash = file_record.hash if file_record else None
@@ -262,6 +507,7 @@ async def _process_single_file_inner(
     else:
         file_record = File(
             original_path=scan.original_path,
+            current_path=scan.original_path,
             hash=scan.sha256,
             size=scan.size_bytes,
             extension=scan.extension,
@@ -322,14 +568,9 @@ async def _process_single_file_inner(
                 key=lambda x: x["score"],
                 reverse=True,
             )
-            category_responses = [
-                CategoryScoreResponse(
-                    category_id=str(d["category_id"]),
-                    name=str(d["name"]),
-                    score=round(float(d["score"]) * 100, 1),  # type: ignore[arg-type]
-                )
-                for d in score_dicts
-            ]
+            category_responses = _build_category_responses(score_dicts)
+        else:
+            score_dicts = []
 
         timings["cache_lookup_ms"] = _elapsed_ms(step_started_at)
 
@@ -341,7 +582,12 @@ async def _process_single_file_inner(
                 cached_names = [cached_analysis.suggested_names]
 
         step_started_at = time.perf_counter()
-        history_metadata = {"suggested_names": cached_names, "pipeline": pipeline, "timings": {}}
+        history_metadata = _build_history_metadata(
+            suggested_names=cached_names,
+            scores=score_dicts,
+            pipeline=pipeline,
+            timings={},
+        )
         history_entry = await history_svc.log(
             db=db, file_id=file_record.id, action="organized_cached", metadata=history_metadata
         )
@@ -387,19 +633,33 @@ async def _process_single_file_inner(
                 )
         except Exception as exc:
             logger.error("Re-classify failed for %s: %s", scan.original_path, exc)
+            await _log_pipeline_issue(
+                db=db,
+                system_log_svc=system_log_svc,
+                level="WARNING",
+                event_type="organize_reclassify_failed",
+                message="Category re-classification failed during organize pipeline.",
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                error=str(exc),
+                pipeline=pipeline,
+                timings=timings,
+            )
         timings["reclassify_ms"] = _elapsed_ms(step_started_at)
 
         # Persist updated categories_hash
         cached_analysis.categories_hash = current_cats_hash
         await db.flush()
 
-        category_responses = [
-            CategoryScoreResponse(category_id=s["category_id"], name=s["name"], score=round(float(s["score"]) * 100, 1))
-            for s in scores
-        ]
+        category_responses = _build_category_responses(scores)
 
         step_started_at = time.perf_counter()
-        history_metadata = {"suggested_names": cached_names, "pipeline": pipeline, "timings": {}}
+        history_metadata = _build_history_metadata(
+            suggested_names=cached_names,
+            scores=scores,
+            pipeline=pipeline,
+            timings={},
+        )
         history_entry = await history_svc.log(
             db=db, file_id=file_record.id, action="organized_reclassified", metadata=history_metadata
         )
@@ -441,6 +701,18 @@ async def _process_single_file_inner(
         summary_text = await summary_svc.summarise(scan.original_path)
     except Exception as exc:
         logger.error("Summary failed for %s: %s", scan.original_path, exc)
+        await _log_pipeline_issue(
+            db=db,
+            system_log_svc=system_log_svc,
+            level="WARNING",
+            event_type="organize_summary_failed",
+            message="AI summary generation failed during organize pipeline.",
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            error=str(exc),
+            pipeline=pipeline,
+            timings=timings,
+        )
     timings["summary_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 6: Generate rename suggestion ───────────────────────────
@@ -454,6 +726,18 @@ async def _process_single_file_inner(
         )
     except Exception as exc:
         logger.error("Rename failed for %s: %s", scan.original_path, exc)
+        await _log_pipeline_issue(
+            db=db,
+            system_log_svc=system_log_svc,
+            level="WARNING",
+            event_type="organize_rename_failed",
+            message="Filename suggestion generation failed during organize pipeline.",
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            error=str(exc),
+            pipeline=pipeline,
+            timings=timings,
+        )
     timings["rename_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 7: Store analysis (robust upsert) ──────────────────────
@@ -493,31 +777,29 @@ async def _process_single_file_inner(
             )
     except Exception as exc:
         logger.error("Classification failed for %s: %s", scan.original_path, exc)
+        await _log_pipeline_issue(
+            db=db,
+            system_log_svc=system_log_svc,
+            level="WARNING",
+            event_type="organize_classification_failed",
+            message="Classification failed during organize pipeline.",
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            error=str(exc),
+            pipeline=pipeline,
+            timings=timings,
+        )
     timings["classify_ms"] = _elapsed_ms(step_started_at)
 
-    category_responses = [
-        CategoryScoreResponse(
-            category_id=s["category_id"],
-            name=s["name"],
-            score=round(float(s["score"]) * 100, 1),
-        )
-        for s in scores
-    ]
+    category_responses = _build_category_responses(scores)
 
     # ── Step 9: Log history ──────────────────────────────────────────
-    history_metadata = {
-        "suggested_names": suggested_names,
-        "all_scores": [
-            {
-                "category_id": s["category_id"],
-                "name": s["name"],
-                "score": s["score"],
-            }
-            for s in scores
-        ],
-        "pipeline": pipeline,
-        "timings": {},
-    }
+    history_metadata = _build_history_metadata(
+        suggested_names=suggested_names,
+        scores=scores,
+        pipeline=pipeline,
+        timings={},
+    )
     step_started_at = time.perf_counter()
     history_entry = await history_svc.log(
         db=db,

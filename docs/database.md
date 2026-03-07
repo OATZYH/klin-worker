@@ -65,6 +65,17 @@ erDiagram
         DateTime created_at "NOT NULL, UTC"
     }
 
+    system_logs {
+      String id PK
+      String level "NOT NULL"
+      String component "NOT NULL"
+      String event_type "NOT NULL"
+      Text message "NOT NULL"
+      Text context_json "NULLABLE, JSON"
+      String correlation_id "NULLABLE"
+      DateTime created_at "NOT NULL, UTC"
+    }
+
     files ||--o| file_analysis : "has"
     files ||--o{ category_scores : "scored in"
     files ||--o{ history_logs : "tracked by"
@@ -113,6 +124,19 @@ erDiagram
                        │ metadata_json     │
                        │ created_at        │
                        └───────────────────┘
+
+┌───────────────────┐
+│    system_logs    │
+├───────────────────┤
+│ id (PK)           │
+│ level             │
+│ component         │
+│ event_type        │
+│ message           │
+│ context_json      │
+│ correlation_id    │
+│ created_at        │
+└───────────────────┘
 ```
 
 ---
@@ -177,6 +201,7 @@ Scanned file metadata. One row per unique file path.
 | --------------- | ------------ | ----------------------- | -------- | ------------------------------------ |
 | `id`            | `String`     | **PK**                  | UUID v4  | Unique identifier                    |
 | `original_path` | `Text`       | NOT NULL, UNIQUE        | —        | Absolute path on disk                |
+| `current_path`  | `Text`       | NOT NULL, UNIQUE        | —        | Current file path tracked by the backend after a confirmed rename/move selection |
 | `hash`          | `String(64)` | NOT NULL                | —        | SHA-256 content hash                 |
 | `size`          | `Integer`    | NOT NULL                | —        | File size in bytes                   |
 | `extension`     | `String(32)` | NOT NULL                | —        | File extension (e.g. `.pdf`, `.png`) |
@@ -244,7 +269,7 @@ AI classification score for each file × category pair. Represents how well a fi
 
 ### `history_logs`
 
-Append-only audit trail of every action performed on a file. Each entry captures a **snapshot** of the scores at the time of the action, so historical decisions can be audited even after categories or models change.
+Append-only audit trail of every action performed on a file. Analysis events (`organized*`) still store AI score snapshots, while user-confirmed actions (`renamed`, `moved`, `renamed_moved`) store the selected category and resulting paths.
 
 | Column          | Type         | Constraints                  | Default  | Description                                  |
 | --------------- | ------------ | ---------------------------- | -------- | -------------------------------------------- |
@@ -328,6 +353,23 @@ Append-only audit trail of every action performed on a file. Each entry captures
 }
 ```
 
+##### `action = "renamed" | "moved" | "renamed_moved"`
+
+บันทึกเมื่อ user ยืนยัน rename และ/หรือ move หลังจากได้รับผลลัพธ์จาก `/api/organize`
+
+```json
+{
+  "file_name": "invoice_march_2026.pdf",
+  "source_path": "/Users/sarun/Downloads/invoice.pdf",
+  "selected_category": {
+    "id": "a1b2c3d4-...",
+    "name": "Finance",
+    "score": 93.0
+  },
+  "new_path": "/Users/sarun/KlinFiles/Finance/invoice_march_2026.pdf"
+}
+```
+
 ---
 
 #### Quick reference
@@ -335,10 +377,32 @@ Append-only audit trail of every action performed on a file. Each entry captures
 | `action`             | เมื่อไหร่                    | `metadata_json` มีอะไร                        |
 | -------------------- | ---------------------------- | ---------------------------------------------- |
 | `organized`          | `/api/organize` สำเร็จ (full run) | `suggested_names[]`, `all_scores[]`       |
-| `organized_cached`   | `/api/organize` cache full hit | `suggested_names[]`                          |
-| `organized_reclassified` | `/api/organize` partial (categories changed) | `suggested_names[]`     |
+| `organized_cached`   | `/api/organize` cache full hit | `suggested_names[]`, `all_scores[]`, `pipeline`, `timings` |
+| `organized_reclassified` | `/api/organize` partial (categories changed) | `suggested_names[]`, `all_scores[]`, `pipeline`, `timings` |
+| `renamed`            | user ยืนยัน rename อย่างเดียว | `file_name`, `source_path`, `new_path` |
+| `moved`              | user ยืนยัน move อย่างเดียว | `file_name`, `source_path`, `selected_category{id,name,score}`, `new_path` |
+| `renamed_moved`      | user ยืนยัน rename + move | `file_name`, `source_path`, `selected_category{id,name,score}`, `new_path` |
 | `category_created`   | สร้าง category ใหม่           | `category_id`, `name`, `description`           |
 | `category_updated`   | แก้ไข category               | `category_id`, `changes`                       |
 | `category_deleted`   | ลบ category                  | `category_id`, `name`                          |
 
-> **Note:** `category_scores` stores the **latest** score (overwritten on re-process). `history_logs` stores the **historical** score snapshot for audit.
+> **Note:** `category_scores` stores the **latest** AI score state. `history_logs` stores either AI score snapshots (`organized*`) or user-confirmed action snapshots (`renamed*`, `moved*`).
+
+---
+
+### `system_logs`
+
+Operational / application logs used for startup diagnostics, warnings, and troubleshooting. This table is intentionally separate from `history_logs`: `history_logs` is per-file audit history, while `system_logs` is app-level telemetry.
+
+| Column           | Type         | Constraints     | Default  | Description |
+| ---------------- | ------------ | --------------- | -------- | ----------- |
+| `id`             | `String`     | **PK**          | UUID v4  | Unique identifier |
+| `level`          | `String(16)` | NOT NULL        | —        | Log level (`INFO`, `WARNING`, `ERROR`) |
+| `component`      | `String(64)` | NOT NULL        | —        | Source such as `app.lifecycle` or `organize.pipeline` |
+| `event_type`     | `String(64)` | NOT NULL        | —        | Stable event key such as `app_startup` |
+| `message`        | `Text`       | NOT NULL        | —        | Human-readable summary |
+| `context_json`   | `Text`       | NULLABLE        | `NULL`   | Structured JSON context for diagnostics |
+| `correlation_id` | `String(64)` | NULLABLE        | `NULL`   | Optional identifier for correlating related events |
+| `created_at`     | `DateTime`   | NOT NULL        | UTC now  | Event timestamp |
+
+**Retention:** `system_logs` are pruned on startup using `KLIN_SYSTEM_LOG_RETENTION_DAYS` (default 30 days).

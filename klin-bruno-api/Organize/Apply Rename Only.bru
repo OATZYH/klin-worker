@@ -1,0 +1,23 @@
+meta {
+  name: Apply Rename Only
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/organize/apply
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "file_id": "{{fileId}}",
+    "selected_name": "{{selectedName}}",
+    "selected_category": null
+  }
+}

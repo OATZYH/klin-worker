@@ -116,6 +116,10 @@ class Settings(BaseSettings):
     max_queue_size: int = 1000
     worker_concurrency: int = 2
 
+    # ── System Logging ───────────────────────────────────────────────────
+    system_log_retention_days: int = 30
+    cleanup_system_logs_on_startup: bool = True
+
     # ── File Watcher (future) ────────────────────────────────────────────
     watch_directories: list[str] = []
     watch_poll_interval_seconds: int = 5

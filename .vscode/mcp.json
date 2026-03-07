@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "dbhub": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@bytebase/dbhub@latest",
+        "--transport",
+        "stdio",
+        "--dsn",
+        "sqlite:///Users/sarun/Work/Senior/klin-worker/.storage/klin.db"
+      ]
+    }
+  }
+}

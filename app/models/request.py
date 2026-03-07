@@ -2,7 +2,7 @@
 Request models for the Klin-Worker API.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── Organize ─────────────────────────────────────────────────────────────
@@ -26,6 +26,38 @@ class OrganizeRequest(BaseModel):
         default=False,
         description="Force re-processing even if file is unchanged and cached.",
     )
+class ApplySelectedCategoryRequest(BaseModel):
+    """Selected category snapshot sent back from the organize response."""
+
+    id: str = Field(..., min_length=1, description="Category id selected by the user.")
+    name: str = Field(..., min_length=1, description="Category name shown in the organize response.")
+    score: float = Field(
+        ...,
+        ge=0,
+        le=100,
+        description="Confidence percentage from the organize response (0-100).",
+    )
+
+
+class ApplyOrganizeDecisionRequest(BaseModel):
+    """POST /api/organize/apply request body."""
+
+    file_id: str = Field(..., min_length=1, description="Existing file id returned by organize.")
+    selected_name: str | None = Field(
+        default=None,
+        min_length=1,
+        description="User-selected final file name. If missing an extension, the current extension is preserved.",
+    )
+    selected_category: ApplySelectedCategoryRequest | None = Field(
+        default=None,
+        description="Category selected by the user, including the score shown in organize.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_has_action(self) -> "ApplyOrganizeDecisionRequest":
+        if not self.selected_name and not self.selected_category:
+            raise ValueError("At least one of selected_name or selected_category must be provided.")
+        return self
 
 
 # ── Categories ───────────────────────────────────────────────────────────

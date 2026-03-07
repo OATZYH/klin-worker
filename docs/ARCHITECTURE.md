@@ -17,6 +17,7 @@
   - [SummaryService](#summaryservice)
   - [RenameService](#renameservice)
   - [HistoryService](#historyservice)
+  - [SystemLogService](#systemlogservice)
 - [LLM Integration (llama-cpp-python)](#llm-integration-llama-cpp-python)
 - [Data Models](#data-models)
 - [Security Model](#security-model)
@@ -63,7 +64,7 @@ The core principle is **privacy-first**: all file processing, LLM inference, emb
 
 - ❌ No file uploads — only absolute paths
 - ❌ No cloud APIs — llama-cpp-python runs in-process
-- ❌ No file mutation — read-only analysis
+- ✅ Tauri performs file mutation after explicit user confirmation; the backend records the confirmed action via apply API
 - ✅ All data stays on the user's machine
 - ✅ Persistent user categories in SQLite
 - ✅ Full audit history of all operations
@@ -119,6 +120,7 @@ app/main.py
 │  summary_service.py    — AI summaries       │
 │  rename_service.py     — AI rename          │
 │  history_service.py    — audit log          │
+│  system_log_service.py — operational log    │
 │  rag_service.py        — embeddings + RAG   │
 │  • All business logic lives here            │
 │  • Async I/O throughout                     │
@@ -401,6 +403,14 @@ category descriptions when they are created or updated.
 
 ---
 
+### SystemLogService
+
+**File:** `app/services/system_log_service.py`  
+**Pattern:** Shared utility, instantiated where needed  
+**Responsibility:** Structured operational logging in SQLite for lifecycle events, warnings, and troubleshooting. Separate from `HistoryService`, which remains file-centric audit history.
+
+---
+
 ### SeedService
 
 **File:** `app/services/seed_service.py`  
@@ -586,6 +596,7 @@ async def organize_files(
 | `SummaryService` | **Per-request** | Wraps RagService, lightweight |
 | `RenameService` | **Per-request** | Stateless |
 | `HistoryService` | **Per-request** | Stateless |
+| `SystemLogService` | **Utility / ad hoc** | Structured app-level operational logs |
 | `AsyncSession` | **Per-request** | Scoped DB session |
 
 ---

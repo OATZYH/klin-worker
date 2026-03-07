@@ -47,14 +47,23 @@ class HistoryService:
         db: AsyncSession,
         file_id: str,
         limit: int = 50,
+        actions: list[str] | None = None,
     ) -> list[HistoryLog]:
         """Return history entries for a specific file (newest first)."""
-        result = await db.execute(
+        file_id_column = getattr(HistoryLog, "file_id")
+        created_at_column = getattr(HistoryLog, "created_at")
+        action_column = getattr(HistoryLog, "action")
+
+        stmt = (
             select(HistoryLog)
-            .where(HistoryLog.file_id == file_id)
-            .order_by(HistoryLog.created_at.desc())
+            .where(file_id_column == file_id)
+            .order_by(created_at_column.desc())
             .limit(limit)
         )
+        if actions:
+            stmt = stmt.where(action_column.in_(actions))
+
+        result = await db.execute(stmt)
         return list(result.scalars().all())
 
     async def get_recent(
@@ -62,10 +71,16 @@ class HistoryService:
         db: AsyncSession,
         limit: int = 100,
         action: str | None = None,
+        actions: list[str] | None = None,
     ) -> list[HistoryLog]:
         """Return the most recent history entries, optionally filtered by action."""
-        stmt = select(HistoryLog).order_by(HistoryLog.created_at.desc()).limit(limit)
+        created_at_column = getattr(HistoryLog, "created_at")
+        action_column = getattr(HistoryLog, "action")
+
+        stmt = select(HistoryLog).order_by(created_at_column.desc()).limit(limit)
         if action:
-            stmt = stmt.where(HistoryLog.action == action)
+            stmt = stmt.where(action_column == action)
+        elif actions:
+            stmt = stmt.where(action_column.in_(actions))
         result = await db.execute(stmt)
         return list(result.scalars().all())
