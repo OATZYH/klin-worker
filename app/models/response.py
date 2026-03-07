@@ -110,3 +110,24 @@ class InitialBasePathResponse(BaseModel):
     default_base_path: str
     categories_seeded: bool = False
     categories: list[CategoryResponse] = []
+
+
+# ── Search ───────────────────────────────────────────────────────────────
+
+
+class FileSearchResultItem(BaseModel):
+    """Single file row returned from POST /api/search/files."""
+
+    id: str
+    file_name: str
+    file_type: str
+    size_bytes: int
+    folder: str
+    last_edited: datetime
+    path: str
+
+
+class FileSearchResponse(BaseModel):
+    """Response for POST /api/search/files."""
+
+    results: list[FileSearchResultItem]
