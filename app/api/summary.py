@@ -9,10 +9,12 @@ combined response.
 """
 
 import logging
+import json
 from pathlib import Path
 from time import perf_counter
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.core.config import settings
@@ -143,6 +145,34 @@ async def _compose_markdown_summary(per_file_summaries: list[tuple[str, str]]) -
     return markdown.strip()
 
 
+def _build_compose_prompt(per_file_summaries: list[tuple[str, str]]) -> str:
+    """Build the markdown synthesis prompt from per-file summaries."""
+    context = "\n\n".join(
+        f"File: {file_name}\nSummary: {summary_text}"
+        for file_name, summary_text in per_file_summaries
+    )
+
+    return (
+        "You are an expert document summarization assistant. "
+        "Using the provided file summaries, produce a clear, detailed markdown summary for end users.\n\n"
+        "Output requirements:\n"
+        "- Return markdown only.\n"
+        "- Be informative and readable (not too short).\n"
+        "- Use this exact section structure (H2 headings):\n"
+        "  ## Overview\n"
+        "  ## Key Points\n"
+        "  ## Per-File Insights\n"
+        "  ## Suggested Actions\n"
+        "- In 'Overview', write 1 to 2 paragraphs.\n"
+        "- In 'Key Points', provide at least 5 bullets that synthesize across files.\n"
+        "- In 'Per-File Insights', include one H3 subsection per file and summarize key content, important details, and missing context.\n"
+        "- In 'Suggested Actions', provide actionable next steps as a numbered list.\n"
+        "- If content is missing or uncertain, explicitly say what is unclear instead of inventing facts.\n\n"
+        "File summaries:\n"
+        f"{context}"
+    )
+
+
 # ── Route ────────────────────────────────────────────────────────────────
 
 
@@ -197,4 +227,72 @@ async def summarise_files(
         summary=combined_markdown,
         suggested_title=suggested_title,
         processing_time_ms=elapsed_ms,
+    )
+
+
+@router.post("/summary/stream")
+async def summarise_files_stream(
+    body: SummaryRequest,
+    summary_svc: SummaryService = Depends(_get_summary),
+) -> StreamingResponse:
+    """Stream markdown summary chunks over SSE for progressive UI rendering."""
+    started = perf_counter()
+    logger.info("Summary stream request — %d file(s)", len(body.file_paths))
+
+    per_file_summaries: list[tuple[str, str]] = []
+    for fp in body.file_paths:
+        try:
+            text = await summary_svc.summarise(fp)
+            if text:
+                per_file_summaries.append((Path(fp).name, text.strip()))
+        except Exception as exc:
+            logger.error("Summary failed for %s: %s", fp, exc)
+
+    suggested_title = _build_suggested_title(body.file_paths)
+
+    async def event_generator():
+        meta_payload = json.dumps({"suggested_title": suggested_title}, ensure_ascii=False)
+        yield f"event: meta\ndata: {meta_payload}\n\n"
+
+        if not per_file_summaries:
+            fallback_text = (
+                "## Overview\n"
+                "No summary could be generated from the selected files.\n\n"
+                "## Suggested Actions\n"
+                "1. Ensure files are readable and contain extractable text.\n"
+                "2. Retry after the files are ingested by the semantic engine."
+            )
+            yield f"event: chunk\ndata: {json.dumps({'delta': fallback_text}, ensure_ascii=False)}\n\n"
+        else:
+            prompt = _build_compose_prompt(per_file_summaries)
+            try:
+                async for token in llm_client.achat_stream(
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.25,
+                    max_tokens=max(settings.summary_max_tokens * 3, 700),
+                ):
+                    yield f"event: chunk\ndata: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
+            except Exception as exc:
+                logger.warning("Summary stream failed, using fallback format: %s", exc)
+                fallback_text = _fallback_markdown(per_file_summaries)
+                yield f"event: chunk\ndata: {json.dumps({'delta': fallback_text}, ensure_ascii=False)}\n\n"
+
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        done_payload = json.dumps(
+            {
+                "processing_time_ms": elapsed_ms,
+                "suggested_title": suggested_title,
+            },
+            ensure_ascii=False,
+        )
+        yield f"event: done\ndata: {done_payload}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

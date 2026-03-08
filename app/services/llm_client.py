@@ -12,8 +12,9 @@ The singleton lifecycle is managed by FastAPI's lifespan in `app/main.py`:
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, Iterator
 
 try:
     from llama_cpp import Llama
@@ -129,6 +130,32 @@ class LlmClient:
         )
 
         return result["choices"][0]["message"]["content"].strip()
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
+        """Stream a chat completion token-by-token."""
+        self._assert_loaded()
+
+        stream_iter = self._llm.create_chat_completion(  # type: ignore[union-attr]
+            messages=messages,  # type: ignore[arg-type]
+            temperature=temperature,
+            max_tokens=max_tokens or settings.max_token_size,
+            stream=True,
+        )
+
+        for chunk in stream_iter:
+            try:
+                delta = chunk["choices"][0].get("delta", {})
+                content = delta.get("content")
+                if isinstance(content, str) and content:
+                    yield content
+            except Exception:
+                continue
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """
@@ -259,6 +286,41 @@ class LlmClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
+
+    async def achat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Async token stream wrapper around `chat_stream()`."""
+        queue: asyncio.Queue[str | Exception | object] = asyncio.Queue()
+        done = object()
+        loop = asyncio.get_running_loop()
+
+        def worker() -> None:
+            try:
+                for token in self.chat_stream(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ):
+                    loop.call_soon_threadsafe(queue.put_nowait, token)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        while True:
+            item = await queue.get()
+            if item is done:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
     async def achat_with_vision(
         self,
