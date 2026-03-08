@@ -185,7 +185,7 @@ The embedding vector is generated from `name + description`. The `description` f
 
 **Default categories:**
 
-Default categories are seeded via `PUT /api/settings/initial-base-path` (called by Tauri on first launch) using `seed_service.py` (idempotent — seeds when the categories table is empty OR when no `is_default=True` rows exist). Embeddings are generated in the same request if llama.cpp and RAG are ready.
+Default categories are seeded via `PUT /api/settings/default-base-path` (called by Tauri on launch) when the categories table is empty. Embeddings are generated in the same request if llama.cpp and RAG are ready.
 
 **Relationships:**
 

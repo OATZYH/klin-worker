@@ -92,10 +92,9 @@ app/main.py
   ├── app/api/settings/              (Router — /api/settings/*)
   │     ├── categories.py             (CRUD /api/settings/categories)
   │     ├── base_path.py              (GET/PUT /api/settings/default-base-path)
-  │     └── init_base_path.py         (PUT /api/settings/initial-base-path)
   │     └── app/services/seed_service.py  (← _build_embed_text shared)
   ├── app/api/history.py              (Router — GET /api/history)
-  ├── app/services/seed_service.py    (Seeding — called via initial-base-path endpoint)
+  ├── app/services/seed_service.py    (Seeding — triggered by default-base-path on first run)
   └── app/services/startup_checks.py  (Startup — verifies DB, llama-cpp-python, RAG)
 ```
 
@@ -107,7 +106,6 @@ app/main.py
 │  app/api/organize.py                        │
 │  app/api/settings/categories.py              │
 │  app/api/settings/base_path.py               │
-│  app/api/settings/init_base_path.py          │
 │  app/api/history.py                         │
 │  • Route definitions                        │
 │  • Request validation (Pydantic)            │
@@ -414,13 +412,13 @@ category descriptions when they are created or updated.
 ### SeedService
 
 **File:** `app/services/seed_service.py`  
-**Pattern:** Called by `PUT /api/settings/initial-base-path` on first launch (idempotent)  
-**Responsibility:** Insert 12 default categories with rich keywords (EN + TH). Also provides `generate_missing_embeddings()` and `_build_embed_text()` shared by the categories router.
+**Pattern:** Called by `PUT /api/settings/default-base-path` on first launch (idempotent)  
+**Responsibility:** Insert the default categories with rich keywords (EN + TH). Also provides `generate_missing_embeddings()` and `_build_embed_text()` shared by the categories router.
 
 > **Note:** Seeding no longer happens automatically at startup. The Tauri frontend
-> calls `PUT /api/settings/initial-base-path` after startup, which triggers seeding
-> with the correct OS-specific base path so every category gets a `destination_path`
-> from the start.
+> calls `PUT /api/settings/default-base-path` after startup. If the categories
+> table is empty, that request triggers seeding with the correct OS-specific base
+> path so every category gets a `destination_path` from the start.
 
 ---
 
@@ -665,8 +663,7 @@ to suggest destination folders
 | `PATCH` | `/api/settings/categories/{id}` | Update category |
 | `DELETE` | `/api/settings/categories/{id}` | Delete category |
 | `GET` | `/api/settings/default-base-path` | Get default base path |
-| `PUT` | `/api/settings/default-base-path` | Set default base path |
-| `PUT` | `/api/settings/initial-base-path` | Startup: set base path + seed categories |
+| `PUT` | `/api/settings/default-base-path` | Set default base path; seed categories on first run |
 | `GET` | `/api/history` | Recent history |
 | `GET` | `/api/history/file/{id}` | File history |
 

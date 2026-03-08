@@ -83,7 +83,7 @@ uv run fastapi run app/main.py
 The server starts at `http://127.0.0.1:8000`. On first boot it will:
 - Run database migrations (creates `.storage/klin.db`)
 - Load the GGUF model into memory
-- Wait for `PUT /api/settings/initial-base-path` (called by Tauri) to seed 12 default categories with folder paths and embeddings
+- Wait for `PUT /api/settings/default-base-path` (called by Tauri) to seed default categories with folder paths and embeddings when the database is empty
 
 ### 5. Verify
 
@@ -134,7 +134,6 @@ klin-worker/
 │   │   │   ├── __init__.py              # Combines routers under /api/settings
 │   │   │   ├── categories.py            # CRUD /api/settings/categories
 │   │   │   ├── base_path.py             # GET/PUT /api/settings/default-base-path
-│   │   │   └── init_base_path.py        # PUT /api/settings/initial-base-path
 │   │   └── history.py                   # GET /api/history
 │   ├── services/
 │   │   ├── llm_client.py               # llama-cpp-python singleton wrapper

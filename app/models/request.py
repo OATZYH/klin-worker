@@ -118,21 +118,6 @@ class DefaultBasePathUpdate(BaseModel):
     )
 
 
-class InitialBasePathRequest(BaseModel):
-    """PUT /api/settings/initial-base-path request body.
-
-    Called by Tauri on first launch to set the OS-specific base path
-    *before* category seeding happens.
-    """
-
-    default_base_path: str = Field(
-        ...,
-        min_length=1,
-        description="Absolute path for the default base folder (e.g. ~/Documents/KlinFiles).",
-        examples=["/Users/sarun/Documents/KlinFiles"],
-    )
-
-
 # ── Search ───────────────────────────────────────────────────────────────
 
 

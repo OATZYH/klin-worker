@@ -8,7 +8,7 @@ FastAPI application entry point.
   • Health-check at /health
   • Organize API at /api/organize
   • Summary API at /api/summary
-    • Settings API at /api/settings (categories, base path, init)
+        • Settings API at /api/settings (categories, base path)
   • History log at /api/history
 """
 
@@ -208,7 +208,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         },
     )
 
-    # NOTE: Category seeding is done via PUT /api/settings/initial-base-path,
+    # NOTE: Category seeding is done via PUT /api/settings/default-base-path,
     # which the Tauri frontend calls on launch.
 
     yield  # ← application runs here

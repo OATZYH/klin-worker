@@ -26,9 +26,9 @@ This is the **heart** of the application. It does:
        await run_migrations()                           # Create/update DB tables
        await _rag_service.setup()                       # Initialize RAG-Anything + llama-cpp-python
        _startup_checks = await run_all_checks(db, rag)  # ← Check DB, llama-cpp-python, RAG
-       # NOTE: Category seeding is NOT done here.
-       # Tauri calls PUT /api/settings/initial-base-path after startup,
-       # which sets the OS-specific base path AND seeds default categories.
+    # NOTE: Category seeding is NOT done here.
+    # Tauri calls PUT /api/settings/default-base-path after startup.
+    # If the categories table is empty, that request also seeds defaults.
        yield                                            # ← App runs here
        # ON SHUTDOWN: (cleanup would go here)
    ```

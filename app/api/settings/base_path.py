@@ -3,8 +3,11 @@ Default base path settings router.
 
 Manage the default base path for category folders.
 When the default base path is updated, all categories that were NOT
-manually customised by the user (is_path_manual=False) have their
-destination_path auto-updated to `{base_path}/{category.name}`.
+manually customised by the user (`is_path_manual=False`) have their
+`destination_path` auto-updated to `{base_path}/{category.name}`.
+
+If no categories exist yet, default categories are seeded first so the
+same endpoint can be used for first-launch setup and later updates.
 
 Mounted at: /api/settings/default-base-path
 """
@@ -20,6 +23,8 @@ from app.db.models import AppSetting, Category
 from app.db.session import get_db
 from app.models.request import DefaultBasePathUpdate
 from app.models.response import CategoryResponse, DefaultBasePathResponse
+from app.services.classification_service import ClassificationService
+from app.services.seed_service import generate_missing_embeddings, seed_default_categories
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +71,7 @@ async def set_default_base_path(
     """
     Set (or update) the default base path for category folders.
 
+    If no categories exist yet, seed the default categories first.
     Every category where `is_path_manual=False` will have its
     `destination_path` auto-updated to `{base_path}/{category.name}`.
     Categories whose path was manually set by the user are untouched.
@@ -90,6 +96,19 @@ async def set_default_base_path(
 
     await db.flush()
 
+    # ── Seed defaults on first run ─────────────────────────────────
+    any_result = await db.execute(select(Category).limit(1))
+    has_categories = any_result.scalar_one_or_none() is not None
+
+    if not has_categories:
+        seeded = await seed_default_categories(db)
+        await db.flush()
+        if seeded > 0:
+            logger.info(
+                "Default base path set on empty category table — seeded %d default categories.",
+                seeded,
+            )
+
     # ── Auto-update non-manual categories ────────────────────────────
     result = await db.execute(
         select(Category).where(
@@ -108,6 +127,23 @@ async def set_default_base_path(
         updated_categories.append(_category_to_response(cat))
 
     await db.flush()
+
+    # ── Generate embeddings if AI services are ready ────────────────
+    try:
+        from app.main import get_rag_service
+        from app.services.llm_client import llm_client
+
+        rag = get_rag_service()
+        if rag.is_ready and llm_client.is_ready:
+            classifier = ClassificationService(rag)
+            embedded = await generate_missing_embeddings(db, classifier)
+            if embedded > 0:
+                logger.info("Generated embeddings for %d categories.", embedded)
+    except Exception:
+        logger.debug(
+            "Skipping embedding generation — AI services not ready.",
+            exc_info=True,
+        )
 
     logger.info(
         "Default base path set to '%s' — %d categories auto-updated.",

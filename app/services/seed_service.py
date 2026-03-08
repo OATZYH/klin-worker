@@ -1,17 +1,17 @@
 """
 Category Seed Service — default categories for file classification.
 
-Seeds default categories into the database on first boot.
+Seeds default categories into the database on first launch.
 Each category stores its full semantic meaning in `description`, which
 may contain both natural language and keyword-style phrases.
 
 Seed categories are marked with `is_default=True`. They are only
 inserted when no default categories exist yet (idempotent).
 
-At boot time the caller should:
+When first-run setup sets the default base path, the caller should:
     1. Call `seed_default_categories(db)` to ensure rows exist.
     2. Call `generate_missing_embeddings(db, classifier)` once RAG is
-         ready, so every category has a precomputed embedding vector.
+       ready, so every category has a precomputed embedding vector.
 """
 
 import json

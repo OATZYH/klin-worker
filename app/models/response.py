@@ -121,14 +121,6 @@ class DefaultBasePathResponse(BaseModel):
     updated_categories: list[CategoryResponse] = []
 
 
-class InitialBasePathResponse(BaseModel):
-    """Response for PUT /api/settings/initial-base-path."""
-
-    default_base_path: str
-    categories_seeded: bool = False
-    categories: list[CategoryResponse] = []
-
-
 # ── Search ───────────────────────────────────────────────────────────────
 
 

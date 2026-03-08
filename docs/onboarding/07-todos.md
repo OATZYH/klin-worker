@@ -51,8 +51,8 @@ uv run fastapi dev app/main.py
 # 4. Test health check
 curl http://127.0.0.1:8000/health
 
-# 5. Set initial base path + seed categories (Tauri does this on launch)
-curl -X PUT http://127.0.0.1:8000/api/settings/initial-base-path \
+# 5. Set default base path (seeds categories if the DB is empty)
+curl -X PUT http://127.0.0.1:8000/api/settings/default-base-path \
   -H "Content-Type: application/json" \
   -d '{"default_base_path": "/Users/you/Documents/KlinFiles"}'
 
