@@ -8,14 +8,32 @@ stored in `alembic/versions/`.
 
 import logging
 from pathlib import Path
+import sys
 
 from alembic import command
 from alembic.config import Config
 
 logger = logging.getLogger(__name__)
 
-# Locate alembic.ini relative to the project root
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+def _resolve_project_root() -> Path:
+    """Resolve project root in both source and frozen runtime modes."""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            bundled_root = Path(meipass)
+            if (bundled_root / "alembic.ini").exists():
+                return bundled_root
+
+        exe_root = Path(sys.executable).resolve().parent
+        if (exe_root / "alembic.ini").exists():
+            return exe_root
+
+        return exe_root
+
+    return Path(__file__).resolve().parent.parent.parent
+
+
+_PROJECT_ROOT = _resolve_project_root()
 _ALEMBIC_INI = _PROJECT_ROOT / "alembic.ini"
 
 

@@ -131,3 +131,35 @@ class InitialBasePathRequest(BaseModel):
         description="Absolute path for the default base folder (e.g. ~/Documents/KlinFiles).",
         examples=["/Users/sarun/Documents/KlinFiles"],
     )
+
+
+# ── Search ───────────────────────────────────────────────────────────────
+
+
+class FileSearchRequest(BaseModel):
+    """POST /api/search/files request body."""
+
+    query: str = Field(
+        ...,
+        min_length=1,
+        description="Search keyword used to match file metadata.",
+        examples=["invoice"],
+    )
+
+
+# ── Notes ────────────────────────────────────────────────────────────────
+
+
+class NotesSummarizeRequest(BaseModel):
+    """POST /api/notes/summarize request body."""
+
+    filePaths: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Absolute file paths to summarize.",
+        examples=[["/Users/sarun/Downloads/meeting-notes.txt"]],
+    )
+    context: str | None = Field(
+        default=None,
+        description="Optional user-provided context for summary generation.",
+    )

@@ -15,7 +15,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from llama_cpp import Llama
+try:
+    from llama_cpp import Llama
+except ModuleNotFoundError:
+    Llama = None
 
 from app.core.config import settings
 
@@ -42,6 +45,11 @@ class LlmClient:
         """Load the GGUF model into memory.  Call once at app startup."""
         if self._llm is not None:
             return
+
+        if Llama is None:
+            raise RuntimeError(
+                "llama-cpp-python is not installed. Install dependencies to enable local LLM features."
+            )
 
         model_path = settings.model_path
 

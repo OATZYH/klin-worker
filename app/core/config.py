@@ -36,8 +36,8 @@ def _resolve_default_storage_dir() -> Path:
         app_data = os.environ.get("KLIN_APP_DATA_DIR")
         if app_data:
             return Path(app_data)
-        # Fallback: next to the executable
-        return Path(sys.executable).parent / "data"
+        # Fallback: stable user-level location when env injection is unavailable.
+        return Path.home() / ".klin"
 
     # Dev: .storage/ at the project root
     _project_root = Path(__file__).resolve().parent.parent.parent

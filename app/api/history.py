@@ -7,6 +7,8 @@ Returns wrapped ``{"results": [...]}`` with enriched history entries.
 
 import json
 import logging
+from datetime import datetime, timezone
+from typing import Any
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query
@@ -26,6 +28,49 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/history", tags=["history"])
 
 USER_ACTIONS = ["renamed", "moved", "renamed_moved"]
+
+
+MOCK_HISTORY_ITEMS: list[dict[str, Any]] = [
+    {
+        "id": "h1",
+        "type": "organize",
+        "title": "Invoice-2026-02.pdf",
+        "subtitle": "Moved to Finance",
+        "timestamp": datetime(2026, 3, 7, 5, 0, tzinfo=timezone.utc).isoformat(),
+        "fromPath": "C:/Users/supak/Downloads/Invoice-2026-02.pdf",
+        "toPath": "C:/Users/supak/Documents/KLIN/Finance/Invoice-2026-02.pdf",
+        "oldName": "invoice_2026_02.pdf",
+        "newName": "Invoice-2026-02.pdf",
+        "scores": [
+            {"name": "Finance", "score": 0.91},
+            {"name": "Work", "score": 0.06},
+            {"name": "Personal", "score": 0.03},
+        ],
+    },
+    {
+        "id": "h2",
+        "type": "summary",
+        "title": "Project-Alpha-Summary.md",
+        "subtitle": "Summary generated",
+        "timestamp": datetime(2026, 3, 7, 4, 20, tzinfo=timezone.utc).isoformat(),
+        "fileNames": ["meeting-notes.txt", "action-items.txt", "timeline.txt"],
+        "summaryPath": "C:/Users/supak/Documents/KLIN/Summaries/Project-Alpha-Summary.md",
+    },
+    {
+        "id": "h3",
+        "type": "calendar",
+        "title": "Project Alpha Weekly Sync",
+        "subtitle": "Calendar event found in notes",
+        "timestamp": datetime(2026, 3, 7, 3, 45, tzinfo=timezone.utc).isoformat(),
+        "foundInFile": True,
+        "sourceFileName": "meeting-notes.txt",
+        "meetingTitle": "Project Alpha Weekly Sync",
+        "meetingTime": "2026-03-08 10:00",
+        "meetingLocation": "Microsoft Teams",
+        "details": "Review sprint progress and pending blockers.",
+        "actionLabel": "Add to calendar",
+    },
+]
 
 
 # ── Dependency Injection ─────────────────────────────────────────────────
@@ -101,24 +146,28 @@ async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
 
 @router.get("", response_model=HistoryListResponse)
 async def list_history(
-    limit: int = Query(default=100, le=500),
+    limit: int = Query(default=20, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     action: str | None = Query(default=None),
+    search: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     history_svc: HistoryService = Depends(_get_history),
 ) -> HistoryListResponse:
-    """Get recent history entries, optionally filtered by action type."""
-    logs = await history_svc.get_recent(
+    """Get paginated recent history entries, optionally filtered by action and search."""
+    logs, has_more = await history_svc.get_recent_page(
         db,
         limit=limit,
+        offset=offset,
         action=action,
         actions=None if action else USER_ACTIONS,
+        search=search,
     )
 
     results = []
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results)
+    return HistoryListResponse(results=results, limit=limit, offset=offset, has_more=has_more)
 
 
 @router.get("/file/{file_id}", response_model=HistoryListResponse)
@@ -135,4 +184,11 @@ async def get_file_history(
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results)
+    return HistoryListResponse(results=results, limit=limit, offset=0, has_more=False)
+
+
+@router.get("/list")
+async def get_mock_history_list() -> dict[str, list[dict[str, Any]]]:
+    """Return UI-ready mock history rows for frontend development/testing."""
+
+    return {"items": MOCK_HISTORY_ITEMS}

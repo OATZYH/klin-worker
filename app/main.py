@@ -23,6 +23,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.history import router as history_router
 from app.api.organize import router as organize_router
+from app.api.search import router as search_router
 from app.api.settings import router as settings_router
 from app.api.summary import router as summary_router
 from app.core.config import settings
@@ -249,6 +250,7 @@ app.include_router(organize_router)
 app.include_router(summary_router)
 app.include_router(settings_router)
 app.include_router(history_router)
+app.include_router(search_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────
