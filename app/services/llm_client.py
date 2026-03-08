@@ -1,24 +1,18 @@
 """
-LLM Client — in-process llama-cpp-python model manager.
+LLM Client — async HTTP client for llama-server.
 
-Loads a GGUF model once via llama-cpp-python's `Llama` class and provides
-synchronous inference methods.  Services bridge to async using
-`asyncio.to_thread()`.
+Communicates with an external llama-server process (managed by Tauri)
+via its OpenAI-compatible REST API at ``settings.llama_server_url``.
 
-The singleton lifecycle is managed by FastAPI's lifespan in `app/main.py`:
-  • `startup()`  — load model into memory
-  • `shutdown()` — release model resources
+The singleton lifecycle is managed by FastAPI's lifespan in ``app/main.py``:
+  • ``startup()``  — create httpx client, verify server reachability
+  • ``shutdown()`` — close httpx client
 """
 
-import asyncio
 import logging
-from pathlib import Path
 from typing import Any
 
-try:
-    from llama_cpp import Llama
-except ModuleNotFoundError:
-    Llama = None
+import httpx
 
 from app.core.config import settings
 
@@ -27,88 +21,105 @@ logger = logging.getLogger(__name__)
 
 class LlmClient:
     """
-    Thin wrapper around a single llama-cpp-python `Llama` instance.
+    Async HTTP client for a local llama-server instance.
 
-    All inference is synchronous (llama-cpp-python is blocking).
-    Async callers should use the `a*` helper methods which delegate
-    to `asyncio.to_thread()`.
+    All inference is natively async via httpx.  No synchronous methods are
+    exposed — callers use ``achat``, ``achat_with_vision``, and ``aembed``
+    directly.
     """
 
     def __init__(self) -> None:
-        self._llm: Llama | None = None
-        self._vision_supported: bool | None = None  # None = not yet tested
-        self._model_name: str = ""
+        self._client: httpx.AsyncClient | None = None
+        self._vision_supported: bool = True  # assume vision unless proven otherwise
+        self._embeddings_supported: bool = True
+        self._model_id: str = ""
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
-    def startup(self) -> None:
-        """Load the GGUF model into memory.  Call once at app startup."""
-        if self._llm is not None:
+    async def startup(self) -> None:
+        """
+        Create the httpx client and optionally check server reachability.
+
+        Call once at app startup (lifespan event).
+        """
+        if self._client is not None:
             return
 
-        if Llama is None:
-            raise RuntimeError(
-                "llama-cpp-python is not installed. Install dependencies to enable local LLM features."
-            )
-
-        model_path = settings.model_path
-
-        # Resolve relative paths against project root
-        resolved = Path(model_path)
-        if not resolved.is_absolute():
-            resolved = Path(__file__).resolve().parent.parent.parent / model_path
-
-        if not resolved.exists():
-            raise FileNotFoundError(
-                f"GGUF model not found: {resolved}\n"
-                "Download the model and place it at the configured path.\n"
-                f"  Config value: KLIN_LLAMACPP_MODEL_PATH={model_path}"
-            )
-
-        logger.info("Loading GGUF model: %s …", resolved)
-
-        self._llm = Llama(
-            model_path=str(resolved),
-            n_ctx=settings.llamacpp_n_ctx,
-            n_gpu_layers=settings.llamacpp_n_gpu_layers,
-            n_batch=settings.llamacpp_n_batch,
-            n_threads=settings.llamacpp_n_threads,
-            embedding=True,           # enable embeddings
-            verbose=settings.llamacpp_verbose,
+        self._client = httpx.AsyncClient(
+            base_url=settings.llama_server_url,
+            timeout=300.0,
         )
 
-        # Detect vision capability from model filename
-        self._model_name = resolved.stem.lower()
-        _vision_keywords = ("vl", "vision", "multimodal", "mm")
-        if any(kw in self._model_name for kw in _vision_keywords):
-            self._vision_supported = True
-            logger.info("Vision-capable model detected: %s", resolved.name)
-        else:
-            self._vision_supported = False
-            logger.info("Text-only model detected: %s", resolved.name)
+        # Probe the server to log reachability and detect the loaded model
+        try:
+            resp = await self._client.get("/models")
+            resp.raise_for_status()
+            data = resp.json()
+            models = data.get("data", [])
+            if models:
+                self._model_id = models[0].get("id", "unknown")
+                logger.info(
+                    "llama-server reachable  →  model: %s", self._model_id
+                )
 
-        logger.info(
-            "Model loaded  →  n_ctx=%d  n_embd=%d  n_gpu_layers=%d  vision=%s",
-            self._llm.n_ctx(),
-            self._llm.n_embd(),
-            settings.llamacpp_n_gpu_layers,
-            self._vision_supported,
-        )
+                # Infer vision capability from model id
+                _vision_keywords = ("vl", "vision", "multimodal", "mm")
+                name_lower = self._model_id.lower()
+                self._vision_supported = any(
+                    kw in name_lower for kw in _vision_keywords
+                )
+                logger.info(
+                    "Vision support: %s (model: %s)",
+                    self._vision_supported,
+                    self._model_id,
+                )
 
-    def shutdown(self) -> None:
-        """Release model resources.  Call at app shutdown."""
-        if self._llm is not None:
-            self._llm.close()
-            self._llm = None
-            logger.info("GGUF model unloaded.")
+                try:
+                    embed_resp = await self._client.post(
+                        "/embeddings",
+                        json={"input": ["health-check"]},
+                    )
+                    embed_resp.raise_for_status()
+                    self._embeddings_supported = True
+                    logger.info("Embeddings support: true")
+                except Exception as exc:
+                    self._embeddings_supported = False
+                    logger.warning(
+                        "Embeddings support: false (%s)",
+                        exc,
+                    )
+            else:
+                logger.warning(
+                    "llama-server reachable but no models loaded."
+                )
+        except Exception as exc:
+            logger.warning(
+                "llama-server not reachable at %s — AI features will fail "
+                "until the server is available. (%s)",
+                settings.llama_server_url,
+                exc,
+            )
+
+    async def shutdown(self) -> None:
+        """Close the httpx client.  Call at app shutdown."""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+            logger.info("llama-server HTTP client closed.")
 
     @property
+    def is_ready(self) -> bool:
+        """Whether the HTTP client has been initialised."""
+        return self._client is not None
+
+    # kept for backward-compat in case any code references is_loaded
+    @property
     def is_loaded(self) -> bool:
-        return self._llm is not None
+        return self.is_ready
 
-    # ── Synchronous primitives ───────────────────────────────────────────
+    # ── Chat completions ─────────────────────────────────────────────────
 
-    def chat(
+    async def achat(
         self,
         messages: list[dict[str, str]],
         *,
@@ -116,57 +127,26 @@ class LlmClient:
         max_tokens: int | None = None,
     ) -> str:
         """
-        Run a chat completion and return the assistant message content.
+        Run a chat completion via the llama-server ``/chat/completions`` endpoint.
 
-        Raises RuntimeError if the model is not loaded.
+        Returns the assistant message content as a plain string.
         """
-        self._assert_loaded()
+        self._assert_ready()
 
-        result: dict[str, Any] = self._llm.create_chat_completion(  # type: ignore[union-attr]
-            messages=messages,  # type: ignore[arg-type]
-            temperature=temperature,
-            max_tokens=max_tokens or settings.max_token_size,
-        )
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+        }
 
-        return result["choices"][0]["message"]["content"].strip()
-
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """
-        Generate embeddings for a list of texts.
-
-        Returns a list of float vectors, one per input text.
-
-        Note: Some models (e.g. Gemma) return per-token embeddings as a 2D
-        list per data item (shape [n_tokens, n_embd]) rather than a single
-        pooled 1D vector. We detect this and mean-pool the token vectors
-        into a single document vector.
-        """
-        self._assert_loaded()
-
-        result = self._llm.create_embedding(input=texts)  # type: ignore[union-attr]
-        data = result["data"]  # type: ignore[index]
-
-        pooled: list[list[float]] = []
-        for item in data:
-            emb = item["embedding"]
-            # Detect 2D per-token embeddings: list of lists
-            if emb and isinstance(emb[0], list):
-                # Mean-pool token vectors → single document vector
-                n_tokens = len(emb)
-                dim = len(emb[0])
-                avg = [
-                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
-                    for d in range(dim)
-                ]
-                pooled.append(avg)
-            else:
-                # Already a 1D vector
-                pooled.append(emb)
-        return pooled
+        resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"].strip()
 
     # ── Vision / multimodal ─────────────────────────────────────────────
 
-    def chat_with_vision(
+    async def achat_with_vision(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -176,40 +156,36 @@ class LlmClient:
         """
         Chat completion that accepts OpenAI-style multimodal messages.
 
-        If the loaded model supports vision, image_url content blocks are
-        forwarded as-is.  Otherwise the images are stripped and the request
-        is retried as text-only so the pipeline never hard-fails.
+        If the server model supports vision, image_url content blocks are
+        forwarded as-is.  Otherwise images are stripped and the request is
+        retried as text-only.
         """
-        self._assert_loaded()
+        self._assert_ready()
 
-        # Fast path: we already know the model lacks vision
-        if self._vision_supported is False:
-            return self.chat(
+        # Fast path: we know the model lacks vision
+        if not self._vision_supported:
+            return await self.achat(
                 self._strip_images(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
 
         try:
-            result: dict[str, Any] = self._llm.create_chat_completion(  # type: ignore[union-attr]
-                messages=messages,  # type: ignore[arg-type]
-                temperature=temperature,
-                max_tokens=max_tokens or settings.max_token_size,
-            )
-            if self._vision_supported is None:
-                self._vision_supported = True
-                logger.info("Vision support confirmed — multimodal messages accepted.")
-            return result["choices"][0]["message"]["content"].strip()
+            body: dict[str, Any] = {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens or settings.max_token_size,
+            }
+            resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
         except Exception as exc:
-            if self._vision_supported is None:
-                self._vision_supported = False
-                logger.warning(
-                    "Model does not support vision input — falling back to text-only. "
-                    "Swap to a vision-capable GGUF to enable image analysis. (%s)",
-                    exc,
-                )
-            # Retry without image blocks
-            return self.chat(
+            logger.warning(
+                "Vision chat failed — falling back to text-only. (%s)", exc
+            )
+            self._vision_supported = False
+            return await self.achat(
                 self._strip_images(messages),
                 temperature=temperature,
                 max_tokens=max_tokens,
@@ -217,8 +193,13 @@ class LlmClient:
 
     @property
     def supports_vision(self) -> bool:
-        """Whether the loaded model accepts multimodal (image) messages."""
+        """Whether the server model accepts multimodal (image) messages."""
         return self._vision_supported is True
+
+    @property
+    def supports_embeddings(self) -> bool:
+        """Whether the server exposes a usable embeddings endpoint."""
+        return self._embeddings_supported is True
 
     @staticmethod
     def _strip_images(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
@@ -243,48 +224,55 @@ class LlmClient:
                 cleaned.append({"role": msg["role"], "content": content})
         return cleaned
 
-    # ── Async wrappers (for FastAPI / async services) ────────────────────
-
-    async def achat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        temperature: float = 0.3,
-        max_tokens: int | None = None,
-    ) -> str:
-        """Async wrapper around `chat()`."""
-        return await asyncio.to_thread(
-            self.chat,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-
-    async def achat_with_vision(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        temperature: float = 0.3,
-        max_tokens: int | None = None,
-    ) -> str:
-        """Async wrapper around `chat_with_vision()`."""
-        return await asyncio.to_thread(
-            self.chat_with_vision,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+    # ── Embeddings ───────────────────────────────────────────────────────
 
     async def aembed(self, texts: list[str]) -> list[list[float]]:
-        """Async wrapper around `embed()`."""
-        return await asyncio.to_thread(self.embed, texts)
+        """
+        Generate embeddings via the llama-server ``/embeddings`` endpoint.
+
+        Returns a list of float vectors, one per input text.
+
+        Note: Some models return per-token embeddings as a 2D list per data
+        item (shape [n_tokens, n_embd]).  We detect this and mean-pool the
+        token vectors into a single document vector.
+        """
+        self._assert_ready()
+
+        if not self._embeddings_supported:
+            raise RuntimeError(
+                "llama-server embeddings endpoint is unavailable. "
+                "Start llama-server with embeddings enabled."
+            )
+
+        body: dict[str, Any] = {"input": texts}
+        resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
+        resp.raise_for_status()
+        data = resp.json()["data"]
+
+        pooled: list[list[float]] = []
+        for item in data:
+            emb = item["embedding"]
+            # Detect 2D per-token embeddings: list of lists
+            if emb and isinstance(emb[0], list):
+                # Mean-pool token vectors → single document vector
+                n_tokens = len(emb)
+                dim = len(emb[0])
+                avg = [
+                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                    for d in range(dim)
+                ]
+                pooled.append(avg)
+            else:
+                # Already a 1D vector
+                pooled.append(emb)
+        return pooled
 
     # ── Internals ────────────────────────────────────────────────────────
 
-    def _assert_loaded(self) -> None:
-        if self._llm is None:
+    def _assert_ready(self) -> None:
+        if self._client is None:
             raise RuntimeError(
-                "LLM model is not loaded. Call LlmClient.startup() first."
+                "LLM client is not initialised. Call LlmClient.startup() first."
             )
 
 

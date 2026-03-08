@@ -122,19 +122,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await run_migrations()
     cleaned_system_logs = await _cleanup_system_logs()
 
-    # ── 3. Load GGUF model in-process (llama-cpp-python) ─────────────
+    # ── 3. Connect to llama-server (out-of-process) ───────────────────
     try:
-        llm_client.startup()
+        await llm_client.startup()
     except Exception:
         logger.warning(
-            "llama-cpp-python model failed to load — "
+            "llama-server connection failed — "
             "the API will work without AI features.",
             exc_info=True,
         )
         await _write_system_log(
             level="WARNING",
             event_type="llm_startup_failed",
-            message="llama-cpp-python model failed to load at startup.",
+            message="llama-server connection failed at startup.",
             context={"component": "llm_client"},
         )
 
@@ -169,10 +169,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 context={"component": "background_ingest"},
             )
 
-    # ── 5. Run startup checks (DB, llama-cpp-python, RAG) ───────────
+    # ── 5. Run startup checks (DB, llama-server, RAG) ────────────────
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
-            if _rag_service.is_ready and llm_client.is_loaded:
+            if _rag_service.is_ready and llm_client.is_ready:
                 classifier = ClassificationService(_rag_service)
                 embedded = await generate_missing_embeddings(db, classifier)
                 if embedded > 0:
@@ -199,7 +199,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         context={
             "version": settings.app_version,
             "rag_ready": _rag_service.is_ready,
-            "llm_loaded": llm_client.is_loaded,
+            "llm_loaded": llm_client.is_ready,
             "cleaned_system_logs": cleaned_system_logs,
             "checks": {
                 result.name: {"ok": result.ok, "detail": result.detail}
@@ -215,7 +215,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # ── Shutdown ─────────────────────────────────────────────────────
     await ingest_worker.stop()
-    llm_client.shutdown()
+    await llm_client.shutdown()
     await _write_system_log(
         level="INFO",
         event_type="app_shutdown",

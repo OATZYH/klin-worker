@@ -3,7 +3,7 @@ Startup Checks — verify all services are operational after boot.
 
 Runs diagnostic checks for:
   • Database connectivity (SQLite read/write)
-  • llama-cpp-python model (in-process GGUF loaded)
+  • llama-server reachability (out-of-process LLM)
   • RAG system readiness (RAG-Anything initialised)
 
 Each check returns a `CheckResult` with status + detail message.
@@ -98,27 +98,30 @@ async def check_database(db: AsyncSession) -> CheckResult:
         return CheckResult(name=name, ok=False, detail=detail)
 
 
-async def check_llamacpp() -> CheckResult:
+async def check_llm_server() -> CheckResult:
     """
-    Verify the llama-cpp-python model is loaded in-process.
+    Verify the llama-server is reachable.
 
-    Checks that the `LlmClient` singleton has a loaded model
-    and reports the model path and embedding dimension.
+    Checks that the `LlmClient` singleton has an initialised HTTP client
+    connected to the external llama-server.
     """
-    name = "llama-cpp-python"
+    name = "LLM Server"
 
     try:
-        if llm_client.is_loaded:
+        if llm_client.is_ready:
+            detail = f"Connected — {settings.llama_server_url}"
+            if not llm_client.supports_embeddings:
+                detail = f"{detail} (embeddings unavailable)"
             return CheckResult(
                 name=name,
                 ok=True,
-                detail=f"Model loaded — {settings.model_path}",
+                detail=detail,
             )
 
         return CheckResult(
             name=name,
             ok=False,
-            detail="Model not loaded. LlmClient.startup() may have failed.",
+            detail="Not connected. LlmClient.startup() may have failed.",
         )
 
     except Exception as exc:
@@ -159,7 +162,7 @@ async def run_all_checks(db: AsyncSession, rag_service) -> list[CheckResult]:  #
     """
     results = [
         await check_database(db),
-        await check_llamacpp(),
+        await check_llm_server(),
         await check_rag(rag_service),
     ]
 

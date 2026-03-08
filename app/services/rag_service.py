@@ -11,7 +11,7 @@ Responsibilities:
 RAG-Anything handles its own vector DB internally — we do NOT
 manage a separate vector store.
 
-LLM backend: llama-cpp-python (in-process GGUF model).
+LLM backend: llama-server (out-of-process, managed by Tauri).
 """
 
 import logging
@@ -25,6 +25,32 @@ from app.core.config import settings
 from app.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    """Convert a generation arg to a positive int when possible."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_llm_max_tokens(kwargs: dict[str, Any]) -> int:
+    """Pick a sane generation budget for internal RAG llama requests."""
+    for key in ("max_tokens", "n_predict", "max_new_tokens"):
+        resolved = _coerce_positive_int(kwargs.get(key))
+        if resolved is not None:
+            return resolved
+    return settings.rag_llm_max_tokens
+
+
+def _resolve_llm_temperature(kwargs: dict[str, Any]) -> float:
+    """Propagate temperature when provided by the caller."""
+    try:
+        return float(kwargs.get("temperature", 0.3))
+    except (TypeError, ValueError):
+        return 0.3
 
 
 class RagService:
@@ -44,12 +70,12 @@ class RagService:
 
     async def setup(self) -> None:
         """
-        Lazy-initialise the RAG-Anything engine with llama-cpp-python as LLM backend.
+        Lazy-initialise the RAG-Anything engine with llama-server as LLM backend.
 
         Connection chain:
-          RAGAnything  →  LightRAG  →  llama-cpp-python (in-process)
+          RAGAnything  →  LightRAG  →  llama-server (out-of-process via httpx)
 
-        The GGUF model must already be loaded via `llm_client.startup()`
+        The llm_client must already be initialised via ``llm_client.startup()``
         before calling this method.
 
         Called once at application startup (lifespan event).
@@ -76,14 +102,14 @@ class RagService:
 
             self._embed_func = _embed
 
-            # Embedding function configured for llama-cpp-python
+            # Embedding function configured for llama-server
             embedding_func = EmbeddingFunc(
                 embedding_dim=settings.embedding_dim,
                 max_token_size=settings.max_token_size,
                 func=_embed,
             )
 
-            # LLM completion function via in-process model
+            # LLM completion function via llama-server
             async def _llm_complete(prompt, system_prompt=None, history_messages=None, **kwargs):
                 messages: list[dict[str, str]] = []
                 if system_prompt:
@@ -91,7 +117,11 @@ class RagService:
                 if history_messages:
                     messages.extend(history_messages)
                 messages.append({"role": "user", "content": prompt})
-                return await llm_client.achat(messages)
+                return await llm_client.achat(
+                    messages,
+                    temperature=_resolve_llm_temperature(kwargs),
+                    max_tokens=_resolve_llm_max_tokens(kwargs),
+                )
 
             # Vision / multimodal completion for RAG-Anything's
             # Visual Content Analyzer (image captions, table analysis, etc.)
@@ -103,9 +133,15 @@ class RagService:
                 messages=None,
                 **kwargs,
             ):
+                temperature = _resolve_llm_temperature(kwargs)
+                max_tokens = _resolve_llm_max_tokens(kwargs)
                 if messages:
                     # Pre-formatted multimodal messages from RAG-Anything
-                    return await llm_client.achat_with_vision(messages)
+                    return await llm_client.achat_with_vision(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
                 elif image_data:
                     # Raw base64 image — build OpenAI-style multimodal message
                     content: list[dict] = [
@@ -121,7 +157,11 @@ class RagService:
                     if system_prompt:
                         msgs.append({"role": "system", "content": system_prompt})
                     msgs.append({"role": "user", "content": content})
-                    return await llm_client.achat_with_vision(msgs)
+                    return await llm_client.achat_with_vision(
+                        msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
                 else:
                     # No visual content — use standard text LLM
                     return await _llm_complete(
@@ -143,9 +183,8 @@ class RagService:
             )
             self._ready = True
             logger.info(
-                "RAG-Anything initialised  →  %s  (model: %s, embd_dim: %d)",
+                "RAG-Anything initialised  →  %s  (embd_dim: %d)",
                 working_dir,
-                settings.model_path,
                 settings.embedding_dim,
             )
         except Exception as exc:

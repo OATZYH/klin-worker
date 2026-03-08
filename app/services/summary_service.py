@@ -1,7 +1,7 @@
 """
 Summary Service — AI-generated file summaries.
 
-Asks the local LLM (via llama-cpp-python, in-process) to produce a concise
+Asks the local LLM (via llama-server, out-of-process) to produce a concise
 one-paragraph summary of a file based on its content retrieved from the RAG engine.
 
 Optimisations vs. the original implementation:

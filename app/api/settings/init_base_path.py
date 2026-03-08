@@ -132,7 +132,7 @@ async def set_initial_base_path(
         from app.services.llm_client import llm_client
 
         rag = get_rag_service()
-        if rag.is_ready and llm_client.is_loaded:
+        if rag.is_ready and llm_client.is_ready:
             classifier = ClassificationService(rag)
             embedded = await generate_missing_embeddings(db, classifier)
             if embedded > 0:

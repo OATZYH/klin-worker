@@ -3,13 +3,15 @@
 > AI File Organizer — local FastAPI backend that analyses files on your machine using semantic AI.  
 > Privacy-first. No file uploads. No cloud dependency. Everything runs locally.
 
+> Current branch runtime: `klin-worker` talks to an external OpenAI-compatible `llama-server` endpoint, usually `http://127.0.0.1:8080/v1`. For app development, you can run `llama-server` from Docker Compose in the app repo and run this worker from source with reload.
+
 ---
 
 ## What is this?
 
 **Klin-Worker** is the backend service for the AI File Organizer desktop app. It receives absolute file paths from a [Tauri](https://tauri.app/) frontend, scans the files locally, ingests them into a semantic engine ([RAG-Anything](https://github.com/RAG-Anything/RAG-Anything)), and returns a structured analysis — without ever moving, renaming, or deleting anything.
 
-Think of it as a **read-only AI advisor** for your file system. Powered by [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) for fully local, in-process inference — no external server needed.
+Think of it as a **read-only AI advisor** for your file system. In this branch, inference is handled by a local [llama.cpp server](https://github.com/ggml-org/llama.cpp) exposed through its OpenAI-compatible HTTP API.
 
 ---
 
@@ -19,9 +21,9 @@ Think of it as a **read-only AI advisor** for your file system. Powered by [llam
 |---|---|
 | API framework | [FastAPI](https://fastapi.tiangolo.com/) |
 | Package manager | [uv](https://docs.astral.sh/uv/) |
-| LLM backend | [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) (in-process GGUF) |
+| LLM backend | [llama.cpp server](https://github.com/ggml-org/llama.cpp) (out-of-process, OpenAI-compatible API) |
 | Semantic engine | [RAG-Anything](https://github.com/RAG-Anything/RAG-Anything) → [LightRAG](https://github.com/HKUDS/LightRAG) |
-| LLM model | `gemma-3-1b-it-Q4_K_M.gguf` (chat + embeddings, swappable) |
+| LLM model | GGUF served by `llama-server` (chat + embeddings, swappable) |
 | Database | SQLite (async via aiosqlite) + [SQLModel](https://sqlmodel.tiangolo.com/) |
 | Migrations | [Alembic](https://alembic.sqlalchemy.org/) |
 | Frontend | Tauri (separate repo) |
@@ -33,7 +35,7 @@ Think of it as a **read-only AI advisor** for your file system. Powered by [llam
 
 1. **Python 3.13+**
 2. **[uv](https://docs.astral.sh/uv/getting-started/installation/)** — fast Python package manager
-3. **A GGUF model file** — e.g. `gemma-3-1b-it-Q4_K_M.gguf` (see below)
+3. **A GGUF model file** for `llama-server` — for example `Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf` (see below)
 
 ---
 
@@ -41,12 +43,15 @@ Think of it as a **read-only AI advisor** for your file system. Powered by [llam
 
 ### 1. Download the GGUF model
 
-A single model handles both chat and embeddings — no external server needed.
+A single model can handle both chat and embeddings. Place it where your chosen runtime can access it:
+
+- app-dev Docker Compose flow: **klin-app/models**
+- packaged sidecar flow: any path referenced by `KLIN_MODEL_PATH`
 
 ```bash
 mkdir -p models
-// Download the model and save it to `models/gemma-3-1b-it-Q4_K_M.gguf`
-// You can use any GGUF model with chat + embedding capabilities — just update the path in .env
+// Download the model and save it to klin-app/models/your-model.gguf for Docker Compose dev
+// You can use any GGUF model with chat + embedding capabilities — just update the matching env value
 TBD: Add mirror links for popular models (Gemma, Mistral, Falcon)
 ```
 
@@ -101,14 +106,12 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KLIN_LLAMACPP_MODEL_PATH` | `models/gemma-3-1b-it-Q4_K_M.gguf` | Path to GGUF model file |
-| `KLIN_LLAMACPP_N_CTX` | `2048` | Context window size |
-| `KLIN_LLAMACPP_N_GPU_LAYERS` | `0` | GPU layers (-1 = all) |
-| `KLIN_LLAMACPP_EMBEDDING_DIM` | `2048` | Embedding vector dimension |
-| `KLIN_LLAMACPP_MAX_TOKEN_SIZE` | `2048` | Max tokens for generation |
-| `KLIN_LLAMACPP_VERBOSE` | `false` | Enable llama.cpp verbose output |
+| `KLIN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080/v1` | OpenAI-compatible `llama-server` base URL |
+| `KLIN_EMBEDDING_DIM_SIZE` | `2048` | Embedding vector dimension expected from the served model |
+| `KLIN_MAX_TOKEN_LIMIT` | `4096` | Max token budget used by worker generation / chunking |
 | `KLIN_DEBUG` | `false` | Enable debug logging |
-| `KLIN_RAG_WORKING_DIR` | `~/.klin/rag_storage` | RAG-Anything storage path |
+| `KLIN_RAG_WORKING_DIR` | `.storage/rag_storage` in source-run dev | RAG-Anything storage path |
+| `KLIN_DATABASE_PATH` | `.storage/klin.db` in source-run dev | SQLite database path |
 | `KLIN_SIMILARITY_THRESHOLD` | `0.85` | Duplicate detection threshold |
 
 ---
