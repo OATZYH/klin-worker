@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── 5. Run startup checks (DB, llama-server, RAG) ────────────────
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
-            if _rag_service.is_ready and llm_client.is_ready:
+            if _rag_service.is_ready and llm_client.supports_embeddings:
                 classifier = ClassificationService(_rag_service)
                 embedded = await generate_missing_embeddings(db, classifier)
                 if embedded > 0:

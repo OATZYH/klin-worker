@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import numpy as np
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.services.llm_client import llm_client
 
@@ -195,6 +196,25 @@ class RagService:
     def is_ready(self) -> bool:
         return self._ready
 
+    def ensure_ready(self) -> None:
+        """Ensure the RAG wrapper is initialised before it is used."""
+        if not self._ready:
+            raise AiCapabilityUnavailableError(
+                "rag",
+                "RAG is unavailable because the RAG service is not initialised.",
+            )
+
+    async def ensure_embedding_available(self) -> None:
+        """Ensure the RAG embedding pipeline is available."""
+        self.ensure_ready()
+        await llm_client.ensure_embedding_available(require_general_check=False)
+
+    async def ensure_full_pipeline_available(self) -> None:
+        """Ensure the full RAG pipeline is available for organize flows."""
+        self.ensure_ready()
+        await llm_client.ensure_general_available()
+        await llm_client.ensure_embedding_available(require_general_check=False)
+
     # ── Embedding ────────────────────────────────────────────────────────
 
     async def embed_texts(self, texts: list[str]) -> Any:
@@ -204,7 +224,7 @@ class RagService:
         Returns a numpy-like array of shape (len(texts), embedding_dim).
         Used by ClassificationService for category ↔ file similarity.
         """
-        self._assert_ready()
+        await self.ensure_embedding_available()
         return await self._embed_func(texts)
 
     # ── Ingestion ────────────────────────────────────────────────────────
@@ -215,7 +235,7 @@ class RagService:
 
         Returns True on success, False on failure.
         """
-        self._assert_ready()
+        self.ensure_ready()
         started_at = time.perf_counter()
 
         try:
@@ -257,7 +277,7 @@ class RagService:
 
         Returns a list of match dicts with score + metadata.
         """
-        self._assert_ready()
+        self.ensure_ready()
 
         try:
             results = await self._rag.aquery(query)
@@ -278,7 +298,7 @@ class RagService:
 
         Falls back to standard text query if multimodal is unavailable.
         """
-        self._assert_ready()
+        self.ensure_ready()
 
         try:
             if multimodal_content and hasattr(self._rag, "aquery_with_multimodal"):
@@ -311,7 +331,7 @@ class RagService:
         Uses `settings.similarity_threshold` unless overridden.
         """
         threshold = threshold or settings.similarity_threshold
-        self._assert_ready()
+        self.ensure_ready()
 
         logger.debug(
             "Duplicate check for %s (threshold=%.2f) — stub",
@@ -323,10 +343,7 @@ class RagService:
     # ── Internals ────────────────────────────────────────────────────────
 
     def _assert_ready(self) -> None:
-        if not self._ready:
-            raise RuntimeError(
-                "RagService is not initialised. Call setup() first."
-            )
+        self.ensure_ready()
 
     @staticmethod
     def _format_results(

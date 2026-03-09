@@ -13,6 +13,7 @@ import numpy as np
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.db.models import Category, CategoryScore, File
 
@@ -127,14 +128,14 @@ class ClassificationService:
 
         Delegates to the RAG service's underlying embedding function.
         """
-        if not self._rag.is_ready:
-            logger.warning("RAG not ready — cannot generate category embedding")
-            return None
+        await self._rag.ensure_embedding_available()
 
         try:
             vectors = await self._rag.embed_texts([text])
             if vectors is not None and len(vectors) > 0:
                 return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Category embedding failed: %s", exc)
         return None
@@ -151,8 +152,7 @@ class ClassificationService:
         ``"<filename> <extension>. <summary>"`` which captures the actual
         content semantics rather than just the filename.
         """
-        if not self._rag.is_ready:
-            return None
+        await self._rag.ensure_embedding_available()
 
         try:
             from pathlib import Path
@@ -167,6 +167,8 @@ class ClassificationService:
             vectors = await self._rag.embed_texts([query_text])
             if vectors is not None and len(vectors) > 0:
                 return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("File embedding failed for %s: %s", file_path, exc)
         return None

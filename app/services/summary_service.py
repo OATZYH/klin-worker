@@ -18,6 +18,7 @@ from typing import Any
 
 import aiofiles
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.services.llm_client import llm_client
 
@@ -78,6 +79,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Summary generation failed for %s: %s", file_path, exc)
             return None
@@ -134,6 +137,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Vision summary failed for %s: %s", p.name, exc)
             return await self._summarise_image_text_fallback(p)
@@ -154,6 +159,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Image text-fallback summary failed for %s: %s", p.name, exc)
             return None

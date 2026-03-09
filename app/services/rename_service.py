@@ -8,6 +8,7 @@ descriptive filenames based on the file extension and AI-generated summary.
 import logging
 import re
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.services.llm_client import llm_client
 
@@ -59,6 +60,8 @@ class RenameService:
                 if clean:
                     names.append(f"{clean}{extension}")
             return names[:count] if names else []
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Rename suggestion failed: %s", exc)
 

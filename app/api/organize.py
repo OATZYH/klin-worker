@@ -33,6 +33,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import (
+    AiCapabilityUnavailableError,
+    format_ai_capability_errors,
+)
 from app.db.models import Category, CategoryScore, File, FileAnalysis
 from app.db.session import get_db
 from app.models.request import (
@@ -50,6 +54,7 @@ from app.models.response import (
 from app.services.background_ingest import ingest_worker
 from app.services.classification_service import ClassificationService
 from app.services.history_service import HistoryService
+from app.services.llm_client import llm_client
 from app.services.rag_service import RagService
 from app.services.rename_service import RenameService
 from app.services.scanner_service import ScannerService
@@ -170,6 +175,80 @@ async def _log_pipeline_issue(
         message=message,
         context=context,
         correlation_id=file_id,
+    )
+
+
+async def _collect_organize_ai_errors(
+    rag: RagService,
+) -> list[AiCapabilityUnavailableError]:
+    """Collect live AI availability failures for organize flows."""
+    errors: list[AiCapabilityUnavailableError] = []
+
+    try:
+        rag.ensure_ready()
+    except AiCapabilityUnavailableError as exc:
+        errors.append(exc)
+
+    try:
+        await llm_client.ensure_general_available()
+    except AiCapabilityUnavailableError as exc:
+        errors.append(exc)
+
+    try:
+        await llm_client.ensure_embedding_available(require_general_check=False)
+    except AiCapabilityUnavailableError as exc:
+        errors.append(exc)
+
+    return errors
+
+
+async def _build_ai_unavailable_result(
+    *,
+    db: AsyncSession,
+    system_log_svc: SystemLogService,
+    filepath: str,
+    file_id: str,
+    suggested_names: list[str],
+    pipeline: dict[str, str | bool | None],
+    timings: dict[str, float],
+    total_started_at: float,
+    ai_errors: list[AiCapabilityUnavailableError],
+    event_type: str,
+    message: str,
+) -> OrganizeFileResult:
+    """Create a consistent per-file AI-unavailable organize result."""
+    detail = format_ai_capability_errors(ai_errors)
+    pipeline["ai_status"] = "unavailable"
+    if any(error.capability == "rag" for error in ai_errors):
+        pipeline["rag_status"] = "not_ready"
+    elif pipeline.get("rag_status") is None:
+        pipeline["rag_status"] = "skipped_ai_unavailable"
+
+    timings["total_ms"] = _elapsed_ms(total_started_at)
+
+    await _log_pipeline_issue(
+        db=db,
+        system_log_svc=system_log_svc,
+        level="WARNING",
+        event_type=event_type,
+        message=message,
+        filepath=filepath,
+        file_id=file_id,
+        error=detail,
+        pipeline=pipeline,
+        timings=timings,
+    )
+    logger.warning(
+        "Organize AI unavailable | file=%s | error=%s | timings=%s",
+        filepath,
+        detail,
+        timings,
+    )
+    return OrganizeFileResult(
+        file_id=file_id,
+        analysis=FileAnalysisResponse(suggested_names=suggested_names),
+        categories=[],
+        error=detail,
     )
 
 
@@ -455,6 +534,7 @@ async def _process_single_file_inner(
     timings: dict[str, float] = {}
     pipeline: dict[str, str | bool | None] = {
         "rag_ready": rag.is_ready,
+        "ai_status": None,
         "is_new_file": False,
         "file_changed": False,
         "rag_status": None,
@@ -621,6 +701,25 @@ async def _process_single_file_inner(
             except (json.JSONDecodeError, TypeError):
                 cached_names = [cached_analysis.suggested_names]
 
+        ai_check_started_at = time.perf_counter()
+        ai_errors = await _collect_organize_ai_errors(rag)
+        timings["ai_check_ms"] = _elapsed_ms(ai_check_started_at)
+        if ai_errors:
+            return await _build_ai_unavailable_result(
+                db=db,
+                system_log_svc=system_log_svc,
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                suggested_names=cached_names,
+                pipeline=pipeline,
+                timings=timings,
+                total_started_at=total_started_at,
+                ai_errors=ai_errors,
+                event_type="organize_reclassify_ai_unavailable",
+                message="AI capabilities unavailable during organize re-classification.",
+            )
+        pipeline["ai_status"] = "ready"
+
         # Re-classify only — reuse cached summary, no LLM summary call
         scores: list[dict] = []
         try:
@@ -631,6 +730,20 @@ async def _process_single_file_inner(
                 scores = await classifier.classify_with_embedding(
                     file_id=file_record.id, file_embedding=file_embedding, db=db
                 )
+        except AiCapabilityUnavailableError as exc:
+            return await _build_ai_unavailable_result(
+                db=db,
+                system_log_svc=system_log_svc,
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                suggested_names=cached_names,
+                pipeline=pipeline,
+                timings=timings,
+                total_started_at=total_started_at,
+                ai_errors=[exc],
+                event_type="organize_reclassify_ai_unavailable",
+                message="AI capabilities unavailable during organize re-classification.",
+            )
         except Exception as exc:
             logger.error("Re-classify failed for %s: %s", scan.original_path, exc)
             await _log_pipeline_issue(
@@ -678,7 +791,27 @@ async def _process_single_file_inner(
             categories=category_responses,
         )
 
-    # ── Step 4: Enqueue background RAG ingestion (non-blocking) ──────
+    # ── Step 4: Live AI capability check ─────────────────────────────
+    step_started_at = time.perf_counter()
+    ai_errors = await _collect_organize_ai_errors(rag)
+    timings["ai_check_ms"] = _elapsed_ms(step_started_at)
+    if ai_errors:
+        return await _build_ai_unavailable_result(
+            db=db,
+            system_log_svc=system_log_svc,
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            suggested_names=[],
+            pipeline=pipeline,
+            timings=timings,
+            total_started_at=total_started_at,
+            ai_errors=ai_errors,
+            event_type="organize_ai_unavailable",
+            message="AI capabilities unavailable during organize pipeline.",
+        )
+    pipeline["ai_status"] = "ready"
+
+    # ── Step 5: Enqueue background RAG ingestion (non-blocking) ──────
     step_started_at = time.perf_counter()
     if not rag.is_ready:
         pipeline["rag_status"] = "not_ready"
@@ -689,7 +822,7 @@ async def _process_single_file_inner(
         pipeline["rag_status"] = "queued" if enqueued else "queue_full"
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 5: Generate summary + file embedding IN PARALLEL ────────
+    # ── Step 6: Generate summary + file embedding IN PARALLEL ────────
     # Summary and embedding generation both need LLM but can overlap:
     # - summary uses chat completion
     # - embedding uses the embed endpoint
@@ -699,6 +832,20 @@ async def _process_single_file_inner(
     summary_text: str | None = None
     try:
         summary_text = await summary_svc.summarise(scan.original_path)
+    except AiCapabilityUnavailableError as exc:
+        return await _build_ai_unavailable_result(
+            db=db,
+            system_log_svc=system_log_svc,
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            suggested_names=[],
+            pipeline=pipeline,
+            timings=timings,
+            total_started_at=total_started_at,
+            ai_errors=[exc],
+            event_type="organize_summary_ai_unavailable",
+            message="AI capabilities unavailable during organize summary generation.",
+        )
     except Exception as exc:
         logger.error("Summary failed for %s: %s", scan.original_path, exc)
         await _log_pipeline_issue(
@@ -715,7 +862,7 @@ async def _process_single_file_inner(
         )
     timings["summary_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 6: Generate rename suggestion ───────────────────────────
+    # ── Step 7: Generate rename suggestion ───────────────────────────
     step_started_at = time.perf_counter()
     suggested_names: list[str] = []
     try:
@@ -723,6 +870,20 @@ async def _process_single_file_inner(
             original_name=scan.file_name,
             extension=scan.extension,
             summary=summary_text,
+        )
+    except AiCapabilityUnavailableError as exc:
+        return await _build_ai_unavailable_result(
+            db=db,
+            system_log_svc=system_log_svc,
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            suggested_names=[],
+            pipeline=pipeline,
+            timings=timings,
+            total_started_at=total_started_at,
+            ai_errors=[exc],
+            event_type="organize_rename_ai_unavailable",
+            message="AI capabilities unavailable during organize rename generation.",
         )
     except Exception as exc:
         logger.error("Rename failed for %s: %s", scan.original_path, exc)
@@ -740,7 +901,7 @@ async def _process_single_file_inner(
         )
     timings["rename_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 7: Store analysis (robust upsert) ──────────────────────
+    # ── Step 8: Store analysis (robust upsert) ──────────────────────
     step_started_at = time.perf_counter()
     # Store categories_hash so the cache knows which category set this was analysed against
     names_json = json.dumps(suggested_names) if suggested_names else None
@@ -761,7 +922,7 @@ async def _process_single_file_inner(
     await db.flush()
     timings["analysis_save_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 8: Classify with summary-enriched embedding ─────────────
+    # ── Step 9: Classify with summary-enriched embedding ─────────────
     step_started_at = time.perf_counter()
     scores: list[dict] = []
     try:
@@ -775,6 +936,20 @@ async def _process_single_file_inner(
                 file_embedding=file_embedding,
                 db=db,
             )
+    except AiCapabilityUnavailableError as exc:
+        return await _build_ai_unavailable_result(
+            db=db,
+            system_log_svc=system_log_svc,
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            suggested_names=suggested_names,
+            pipeline=pipeline,
+            timings=timings,
+            total_started_at=total_started_at,
+            ai_errors=[exc],
+            event_type="organize_classify_ai_unavailable",
+            message="AI capabilities unavailable during organize classification.",
+        )
     except Exception as exc:
         logger.error("Classification failed for %s: %s", scan.original_path, exc)
         await _log_pipeline_issue(
@@ -793,7 +968,7 @@ async def _process_single_file_inner(
 
     category_responses = _build_category_responses(scores)
 
-    # ── Step 9: Log history ──────────────────────────────────────────
+    # ── Step 10: Log history ─────────────────────────────────────────
     history_metadata = _build_history_metadata(
         suggested_names=suggested_names,
         scores=scores,

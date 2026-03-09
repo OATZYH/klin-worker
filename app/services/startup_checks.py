@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.db.models import Category
 from app.services.llm_client import llm_client
@@ -108,24 +109,19 @@ async def check_llm_server() -> CheckResult:
     name = "LLM Server"
 
     try:
-        if llm_client.is_ready:
-            detail = f"Connected — {settings.llama_server_url}"
-            if not llm_client.supports_embeddings:
-                detail = f"{detail} (embeddings unavailable)"
-            return CheckResult(
-                name=name,
-                ok=True,
-                detail=detail,
-            )
-
-        return CheckResult(
-            name=name,
-            ok=False,
-            detail="Not connected. LlmClient.startup() may have failed.",
-        )
-
+        await llm_client.ensure_general_available()
+    except AiCapabilityUnavailableError as exc:
+        return CheckResult(name=name, ok=False, detail=exc.detail)
     except Exception as exc:
         return CheckResult(name=name, ok=False, detail=str(exc))
+
+    detail = f"Connected — {settings.llama_server_url}"
+    try:
+        await llm_client.ensure_embedding_available(require_general_check=False)
+    except AiCapabilityUnavailableError:
+        detail = f"{detail} (embeddings unavailable)"
+
+    return CheckResult(name=name, ok=True, detail=detail)
 
 
 async def check_rag(rag_service) -> CheckResult:  # type: ignore[type-arg]
@@ -136,6 +132,7 @@ async def check_rag(rag_service) -> CheckResult:  # type: ignore[type-arg]
     """
     name = "RAG-Anything"
     try:
+        rag_service.ensure_ready()
         if rag_service.is_ready:
             return CheckResult(
                 name=name,
@@ -147,6 +144,8 @@ async def check_rag(rag_service) -> CheckResult:  # type: ignore[type-arg]
             ok=False,
             detail="Not initialised. RAG-Anything setup() may have failed.",
         )
+    except AiCapabilityUnavailableError as exc:
+        return CheckResult(name=name, ok=False, detail=exc.detail)
     except Exception as exc:
         return CheckResult(name=name, ok=False, detail=str(exc))
 

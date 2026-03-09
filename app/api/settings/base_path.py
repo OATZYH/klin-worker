@@ -19,6 +19,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import (
+    AiCapabilityUnavailableError,
+    to_service_unavailable_http_exception,
+)
 from app.db.models import AppSetting, Category
 from app.db.session import get_db
 from app.models.request import DefaultBasePathUpdate
@@ -99,15 +103,29 @@ async def set_default_base_path(
     # ── Seed defaults on first run ─────────────────────────────────
     any_result = await db.execute(select(Category).limit(1))
     has_categories = any_result.scalar_one_or_none() is not None
+    seeded = 0
 
     if not has_categories:
-        seeded = await seed_default_categories(db)
-        await db.flush()
-        if seeded > 0:
-            logger.info(
-                "Default base path set on empty category table — seeded %d default categories.",
-                seeded,
-            )
+        try:
+            from app.main import get_rag_service
+
+            rag = get_rag_service()
+            classifier = ClassificationService(rag)
+
+            seeded = await seed_default_categories(db)
+            await db.flush()
+            if seeded > 0:
+                embedded = await generate_missing_embeddings(db, classifier)
+                if embedded != seeded:
+                    raise RuntimeError(
+                        "Failed to generate embeddings for all seeded categories."
+                    )
+                logger.info(
+                    "Default base path set on empty category table — seeded %d default categories.",
+                    seeded,
+                )
+        except AiCapabilityUnavailableError as exc:
+            raise to_service_unavailable_http_exception(exc) from exc
 
     # ── Auto-update non-manual categories ────────────────────────────
     result = await db.execute(
@@ -129,21 +147,21 @@ async def set_default_base_path(
     await db.flush()
 
     # ── Generate embeddings if AI services are ready ────────────────
-    try:
-        from app.main import get_rag_service
-        from app.services.llm_client import llm_client
+    if seeded == 0:
+        try:
+            from app.main import get_rag_service
 
-        rag = get_rag_service()
-        if rag.is_ready and llm_client.is_ready:
-            classifier = ClassificationService(rag)
-            embedded = await generate_missing_embeddings(db, classifier)
-            if embedded > 0:
-                logger.info("Generated embeddings for %d categories.", embedded)
-    except Exception:
-        logger.debug(
-            "Skipping embedding generation — AI services not ready.",
-            exc_info=True,
-        )
+            rag = get_rag_service()
+            if rag.is_ready:
+                classifier = ClassificationService(rag)
+                embedded = await generate_missing_embeddings(db, classifier)
+                if embedded > 0:
+                    logger.info("Generated embeddings for %d categories.", embedded)
+        except Exception:
+            logger.debug(
+                "Skipping embedding generation — AI services not ready.",
+                exc_info=True,
+            )
 
     logger.info(
         "Default base path set to '%s' — %d categories auto-updated.",

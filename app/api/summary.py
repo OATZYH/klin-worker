@@ -13,8 +13,13 @@ import logging
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.core.ai_exceptions import (
+    AiCapabilityUnavailableError,
+    to_service_unavailable_http_exception,
+)
 from app.services.rag_service import RagService
 from app.services.summary_service import SummaryService
+from app.services.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +74,19 @@ async def summarise_files(
     """
     logger.info("Summary request — %d file(s)", len(body.file_paths))
 
+    try:
+        await llm_client.ensure_general_available()
+    except AiCapabilityUnavailableError as exc:
+        raise to_service_unavailable_http_exception(exc) from exc
+
     summaries: list[str] = []
     for fp in body.file_paths:
         try:
             text = await summary_svc.summarise(fp)
             if text:
                 summaries.append(text)
+        except AiCapabilityUnavailableError as exc:
+            raise to_service_unavailable_http_exception(exc) from exc
         except Exception as exc:
             logger.error("Summary failed for %s: %s", fp, exc)
 
