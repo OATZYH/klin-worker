@@ -283,7 +283,9 @@ class LlmClient:
         try:
             resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
-            data = resp.json()["data"]
+            resp_json = resp.json()
+            # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
+            data = resp_json if isinstance(resp_json, list) else resp_json["data"]
             self._server_reachable = True
             self._embeddings_supported = True
         except Exception as exc:

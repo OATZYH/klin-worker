@@ -127,8 +127,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await llm_client.startup()
     except Exception:
         logger.warning(
-            "llama-server connection failed — "
-            "the API will work without AI features.",
+            "llama-server connection failed — the API will work without AI features.",
             exc_info=True,
         )
         await _write_system_log(
@@ -255,16 +254,17 @@ app.include_router(search_router)
 
 # ── Health check ─────────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health() -> dict:
-    checks = {
-        r.name: {"ok": r.ok, "detail": r.detail}
-        for r in _startup_checks
+    checks = {r.name: {"ok": r.ok, "detail": r.detail} for r in _startup_checks}
+    checks["FastAPI"] = {
+        "ok": True,
+        "detail": f"{settings.app_name} v{settings.app_version} is running",
     }
     all_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
     return {
         "status": "ok" if all_ok else "degraded",
         "version": settings.app_version,
         "services": checks,
-        "rag_ready": _rag_service.is_ready,
     }

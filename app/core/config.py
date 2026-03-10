@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
     # ── llama-server (out-of-process, managed by Tauri) ────────────────
-    llama_server_url: str = "http://127.0.0.1:8080/v1"
+    llama_server_url: str = "http://127.0.0.1:8080/"
     embedding_dim_size: int = 2048        # must match model served by llama-server
     max_token_limit: int = 4096           # used for RAG chunking
 
