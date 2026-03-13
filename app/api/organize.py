@@ -52,13 +52,13 @@ from app.models.response import (
     OrganizeResponse,
 )
 from app.services.background_ingest import ingest_worker
-from app.services.classification_service import ClassificationService
+from app.services.categories.classification_service import ClassificationService
 from app.services.history_service import HistoryService
-from app.services.llm_client import llm_client
-from app.services.rag_service import RagService
-from app.services.rename_service import RenameService
-from app.services.scanner_service import ScannerService
-from app.services.summary_service import SummaryService
+from app.services.ai.llm_client import llm_client
+from app.services.ai.rag_service import RagService
+from app.services.ai.rename_service import RenameService
+from app.services.files.scanner_service import ScannerService
+from app.services.ai.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
 
 logger = logging.getLogger(__name__)

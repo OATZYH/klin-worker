@@ -8,21 +8,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-# ── Scanner ──────────────────────────────────────────────────────────────
-
-
-class FileScanResult(BaseModel):
-    """Metadata extracted by ScannerService for a single file."""
-
-    original_path: str
-    file_name: str
-    extension: str
-    size_bytes: int
-    sha256: str
-    exists: bool
-    error: Optional[str] = None
-
-
 # ── Category ─────────────────────────────────────────────────────────────
 
 

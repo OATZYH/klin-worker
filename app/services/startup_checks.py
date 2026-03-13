@@ -19,7 +19,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.db.models import Category
-from app.services.llm_client import llm_client
+from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 

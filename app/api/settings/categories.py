@@ -26,9 +26,9 @@ from app.db.models import Category, CategoryScore
 from app.db.session import get_db
 from app.models.request import BatchCategoryCreate, CategoryCreate, CategoryUpdate
 from app.models.response import CategoryResponse
-from app.services.classification_service import ClassificationService
-from app.services.rag_service import RagService
-from app.services.seed_service import _build_embed_text
+from app.services.categories.category_embedding_text import build_category_embedding_text
+from app.services.categories.classification_service import ClassificationService
+from app.services.ai.rag_service import RagService
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ async def _generate_embedding(
     classifier: ClassificationService,
 ) -> str:
     """Generate embedding JSON string for a category."""
-    embed_text = _build_embed_text(cat)
+    embed_text = build_category_embedding_text(cat)
     embedding_vec = await classifier.generate_category_embedding(embed_text)
     if not embedding_vec:
         raise RuntimeError("Embedding generation returned no vector.")
