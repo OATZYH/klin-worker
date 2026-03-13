@@ -22,6 +22,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import Category
+from app.services.categories.category_embedding_text import build_category_embedding_text
 
 logger = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ async def generate_missing_embeddings(
 
     count = 0
     for cat in categories:
-        embed_text = _build_embed_text(cat)
+        embed_text = build_category_embedding_text(cat)
         vec = await classifier.generate_category_embedding(embed_text)
         if vec:
             cat.embedding = json.dumps(vec)
@@ -208,16 +209,3 @@ async def generate_missing_embeddings(
 
     return count
 
-
-def _build_embed_text(cat: Category) -> str:
-    """
-    Build the text blob used to generate a category's embedding.
-
-    Combines name and description. Description can include both natural
-    language and keyword-style phrases.
-    """
-    parts = [cat.name.strip()]
-    description = cat.description.strip() if cat.description else ""
-    if description:
-        parts.append(description)
-    return "\n".join(parts)

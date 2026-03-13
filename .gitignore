@@ -13,11 +13,11 @@ wheels/
 .DS_Store
 
 # AI
-ai/
 .agent/
 .agents/
 .claude/
 .gemini/
+prompts/
 
 # env
 .env

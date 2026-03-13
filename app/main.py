@@ -30,10 +30,10 @@ from app.core.config import settings
 from app.db.migrations import run_migrations
 from app.db.session import engine
 from app.services.background_ingest import ingest_worker
-from app.services.classification_service import ClassificationService
-from app.services.llm_client import llm_client
-from app.services.rag_service import RagService
-from app.services.seed_service import generate_missing_embeddings
+from app.services.categories.classification_service import ClassificationService
+from app.services.ai.llm_client import llm_client
+from app.services.ai.rag_service import RagService
+from app.services.categories.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
 from app.services.system_log_service import SystemLogService
 

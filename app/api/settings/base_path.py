@@ -27,8 +27,8 @@ from app.db.models import AppSetting, Category
 from app.db.session import get_db
 from app.models.request import DefaultBasePathUpdate
 from app.models.response import CategoryResponse, DefaultBasePathResponse
-from app.services.classification_service import ClassificationService
-from app.services.seed_service import generate_missing_embeddings, seed_default_categories
+from app.services.categories.classification_service import ClassificationService
+from app.services.categories.seed_service import generate_missing_embeddings, seed_default_categories
 
 logger = logging.getLogger(__name__)
 
