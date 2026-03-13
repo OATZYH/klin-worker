@@ -29,14 +29,12 @@ from app.core.ai_exceptions import (
     AiCapabilityUnavailableError,
     to_service_unavailable_http_exception,
 )
+from app.core.config import settings
 from app.db.session import get_db
 from app.services.ai.rag_service import RagService
+from app.services.ai.llm_client import llm_client
 from app.services.ai.summary_service import SummaryService
 from app.services.summary_workflow_service import SummaryWorkflowService
-from app.core.config import settings
-from app.services.llm_client import llm_client
-from app.services.rag_service import RagService
-from app.services.summary_service import SummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +83,7 @@ def _get_summary_workflow(
     summary_svc: SummaryService = Depends(_get_summary),
 ) -> SummaryWorkflowService:
     return SummaryWorkflowService(summary_svc)
+
 
 def _build_suggested_title(file_paths: list[str]) -> str:
     """Generate a stable title suggestion from the first file name."""
@@ -219,8 +218,10 @@ async def summarise_files(
     for fp in body.file_paths:
         logger.debug("Queued summary request item | file=%s", fp)
 
+    started = perf_counter()
+
     try:
-        combined = await workflow.summarise_files(
+        per_file_summaries = await workflow.summarise_file_items(
             file_paths=body.file_paths,
             force=body.force,
             db=db,
@@ -229,18 +230,7 @@ async def summarise_files(
         raise to_service_unavailable_http_exception(exc) from exc
     except Exception as exc:
         logger.error("Summary request failed: %s", exc)
-        combined = "No summary could be generated."
-    started = perf_counter()
-    logger.info("Summary request — %d file(s)", len(body.file_paths))
-
-    per_file_summaries: list[tuple[str, str]] = []
-    for fp in body.file_paths:
-        try:
-            text = await summary_svc.summarise(fp)
-            if text:
-                per_file_summaries.append((Path(fp).name, text.strip()))
-        except Exception as exc:
-            logger.error("Summary failed for %s: %s", fp, exc)
+        per_file_summaries = []
 
     suggested_title = _build_suggested_title(body.file_paths)
 
@@ -276,20 +266,28 @@ async def summarise_files(
 @router.post("/summary/stream")
 async def summarise_files_stream(
     body: SummaryRequest,
-    summary_svc: SummaryService = Depends(_get_summary),
+    db: AsyncSession = Depends(get_db),
+    workflow: SummaryWorkflowService = Depends(_get_summary_workflow),
 ) -> StreamingResponse:
     """Stream markdown summary chunks over SSE for progressive UI rendering."""
     started = perf_counter()
-    logger.info("Summary stream request — %d file(s)", len(body.file_paths))
+    logger.info(
+        "Summary stream request — %d file(s), force=%s",
+        len(body.file_paths),
+        body.force,
+    )
 
-    per_file_summaries: list[tuple[str, str]] = []
-    for fp in body.file_paths:
-        try:
-            text = await summary_svc.summarise(fp)
-            if text:
-                per_file_summaries.append((Path(fp).name, text.strip()))
-        except Exception as exc:
-            logger.error("Summary failed for %s: %s", fp, exc)
+    try:
+        per_file_summaries = await workflow.summarise_file_items(
+            file_paths=body.file_paths,
+            force=body.force,
+            db=db,
+        )
+    except AiCapabilityUnavailableError as exc:
+        raise to_service_unavailable_http_exception(exc) from exc
+    except Exception as exc:
+        logger.error("Summary stream request failed: %s", exc)
+        per_file_summaries = []
 
     suggested_title = _build_suggested_title(body.file_paths)
 

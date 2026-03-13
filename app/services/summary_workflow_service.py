@@ -13,6 +13,7 @@ remains focused on generating a summary for a single file.
 """
 
 import logging
+from pathlib import Path
 
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -38,9 +39,26 @@ class SummaryWorkflowService:
         db: AsyncSession,
     ) -> str:
         """Generate or reuse summaries, then combine them for the API response."""
+        per_file = await self.summarise_file_items(
+            file_paths=file_paths,
+            force=force,
+            db=db,
+        )
+        summaries = [summary for _, summary in per_file]
+
+        return "\n\n".join(summaries) if summaries else "No summary could be generated."
+
+    async def summarise_file_items(
+        self,
+        *,
+        file_paths: list[str],
+        force: bool,
+        db: AsyncSession,
+    ) -> list[tuple[str, str]]:
+        """Generate or reuse per-file summaries with display names."""
         await llm_client.ensure_general_available()
 
-        summaries: list[str] = []
+        items: list[tuple[str, str]] = []
         for file_path in file_paths:
             summary = await self._get_or_generate_summary(
                 db=db,
@@ -48,9 +66,9 @@ class SummaryWorkflowService:
                 force=force,
             )
             if summary:
-                summaries.append(summary)
+                items.append((Path(file_path).name, summary.strip()))
 
-        return "\n\n".join(summaries) if summaries else "No summary could be generated."
+        return items
 
     async def _get_or_generate_summary(
         self,

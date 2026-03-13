@@ -9,8 +9,12 @@ The singleton lifecycle is managed by FastAPI's lifespan in ``app/main.py``:
   • ``shutdown()`` — close httpx client
 """
 
+import asyncio
+import json
 import logging
-from typing import Any
+import queue
+import threading
+from typing import Any, AsyncIterator, Iterator
 
 import httpx
 
@@ -182,6 +186,107 @@ class LlmClient:
             raise AiCapabilityUnavailableError(
                 "general",
                 "General AI is unavailable because llama-server cannot complete chat requests.",
+            ) from exc
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> Iterator[str]:
+        """Synchronous token stream wrapper around `achat_stream()`."""
+        output_queue: queue.Queue[str | Exception | object] = queue.Queue()
+        done = object()
+
+        async def _producer() -> None:
+            try:
+                async for token in self.achat_stream(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ):
+                    output_queue.put(token)
+            except Exception as exc:
+                output_queue.put(exc)
+            finally:
+                output_queue.put(done)
+
+        def _run() -> None:
+            asyncio.run(_producer())
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        while True:
+            item = output_queue.get()
+            if item is done:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    async def achat_stream(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float = 0.3,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream chat completion tokens from llama-server."""
+        self._assert_client_started("general")
+
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+            "stream": True,
+        }
+
+        try:
+            async with self._client.stream(  # type: ignore[union-attr]
+                "POST",
+                "/chat/completions",
+                json=body,
+            ) as resp:
+                resp.raise_for_status()
+                self._server_reachable = True
+
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+
+                    payload = line
+                    if payload.startswith("data:"):
+                        payload = payload[len("data:"):].strip()
+
+                    if payload == "[DONE]":
+                        break
+
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
+
+                    first_choice = choices[0]
+                    delta = first_choice.get("delta") or {}
+                    content = delta.get("content")
+
+                    if not content:
+                        message = first_choice.get("message") or {}
+                        content = message.get("content")
+
+                    if isinstance(content, str) and content:
+                        yield content
+        except Exception as exc:
+            self._mark_general_unavailable()
+            raise AiCapabilityUnavailableError(
+                "general",
+                "General AI is unavailable because llama-server cannot stream chat requests.",
             ) from exc
 
     # ── Vision / multimodal ─────────────────────────────────────────────
