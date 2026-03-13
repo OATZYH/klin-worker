@@ -6,6 +6,13 @@ POST /api/summary — generate a combined summary for the given files.
 Uses the existing SummaryService (vision model for images, LLM for
 text/documents) and concatenates per-file summaries into a single
 combined response.
+
+Caching:
+  • If the file has already been processed by organize, its summary is
+    stored in file_analysis.summary and returned instantly (cache hit).
+  • Pass ``force=true`` to bypass the cache and regenerate.
+  • Freshly generated summaries are persisted back to file_analysis so
+    subsequent calls are always fast.
 """
 
 import logging
@@ -16,11 +23,18 @@ from time import perf_counter
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import (
+    AiCapabilityUnavailableError,
+    to_service_unavailable_http_exception,
+)
 from app.core.config import settings
-from app.services.llm_client import llm_client
-from app.services.rag_service import RagService
-from app.services.summary_service import SummaryService
+from app.db.session import get_db
+from app.services.ai.rag_service import RagService
+from app.services.ai.llm_client import llm_client
+from app.services.ai.summary_service import SummaryService
+from app.services.summary_workflow_service import SummaryWorkflowService
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +51,10 @@ class SummaryRequest(BaseModel):
         ...,
         min_length=1,
         description="Absolute file paths to summarise.",
+    )
+    force: bool = Field(
+        default=False,
+        description="Force regeneration even when a cached summary exists.",
     )
 
 
@@ -59,6 +77,12 @@ def _get_rag() -> RagService:
 
 def _get_summary(rag: RagService = Depends(_get_rag)) -> SummaryService:
     return SummaryService(rag)
+
+
+def _get_summary_workflow(
+    summary_svc: SummaryService = Depends(_get_summary),
+) -> SummaryWorkflowService:
+    return SummaryWorkflowService(summary_svc)
 
 
 def _build_suggested_title(file_paths: list[str]) -> str:
@@ -179,25 +203,34 @@ def _build_compose_prompt(per_file_summaries: list[tuple[str, str]]) -> str:
 @router.post("/summary", response_model=SummaryResponse)
 async def summarise_files(
     body: SummaryRequest,
-    summary_svc: SummaryService = Depends(_get_summary),
+    db: AsyncSession = Depends(get_db),
+    workflow: SummaryWorkflowService = Depends(_get_summary_workflow),
 ) -> SummaryResponse:
     """
     Generate a combined summary from the provided files.
 
-    Each file is summarised independently, then all per-file summaries
-    are joined into a single text block.
+    Cache-first: if the file was already processed by organize, its summary
+    is returned instantly from file_analysis.  Pass ``force=true`` to
+    regenerate.  Freshly generated summaries are persisted back to the DB.
     """
-    started = perf_counter()
-    logger.info("Summary request — %d file(s)", len(body.file_paths))
+    logger.info("Summary request — %d file(s), force=%s", len(body.file_paths), body.force)
 
-    per_file_summaries: list[tuple[str, str]] = []
     for fp in body.file_paths:
-        try:
-            text = await summary_svc.summarise(fp)
-            if text:
-                per_file_summaries.append((Path(fp).name, text.strip()))
-        except Exception as exc:
-            logger.error("Summary failed for %s: %s", fp, exc)
+        logger.debug("Queued summary request item | file=%s", fp)
+
+    started = perf_counter()
+
+    try:
+        per_file_summaries = await workflow.summarise_file_items(
+            file_paths=body.file_paths,
+            force=body.force,
+            db=db,
+        )
+    except AiCapabilityUnavailableError as exc:
+        raise to_service_unavailable_http_exception(exc) from exc
+    except Exception as exc:
+        logger.error("Summary request failed: %s", exc)
+        per_file_summaries = []
 
     suggested_title = _build_suggested_title(body.file_paths)
 
@@ -233,20 +266,28 @@ async def summarise_files(
 @router.post("/summary/stream")
 async def summarise_files_stream(
     body: SummaryRequest,
-    summary_svc: SummaryService = Depends(_get_summary),
+    db: AsyncSession = Depends(get_db),
+    workflow: SummaryWorkflowService = Depends(_get_summary_workflow),
 ) -> StreamingResponse:
     """Stream markdown summary chunks over SSE for progressive UI rendering."""
     started = perf_counter()
-    logger.info("Summary stream request — %d file(s)", len(body.file_paths))
+    logger.info(
+        "Summary stream request — %d file(s), force=%s",
+        len(body.file_paths),
+        body.force,
+    )
 
-    per_file_summaries: list[tuple[str, str]] = []
-    for fp in body.file_paths:
-        try:
-            text = await summary_svc.summarise(fp)
-            if text:
-                per_file_summaries.append((Path(fp).name, text.strip()))
-        except Exception as exc:
-            logger.error("Summary failed for %s: %s", fp, exc)
+    try:
+        per_file_summaries = await workflow.summarise_file_items(
+            file_paths=body.file_paths,
+            force=body.force,
+            db=db,
+        )
+    except AiCapabilityUnavailableError as exc:
+        raise to_service_unavailable_http_exception(exc) from exc
+    except Exception as exc:
+        logger.error("Summary stream request failed: %s", exc)
+        per_file_summaries = []
 
     suggested_title = _build_suggested_title(body.file_paths)
 

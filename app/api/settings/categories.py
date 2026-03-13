@@ -18,13 +18,17 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel import func, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import (
+    AiCapabilityUnavailableError,
+    to_service_unavailable_http_exception,
+)
 from app.db.models import Category, CategoryScore
 from app.db.session import get_db
 from app.models.request import BatchCategoryCreate, CategoryCreate, CategoryUpdate
 from app.models.response import CategoryResponse
-from app.services.classification_service import ClassificationService
-from app.services.rag_service import RagService
-from app.services.seed_service import _build_embed_text
+from app.services.categories.category_embedding_text import build_category_embedding_text
+from app.services.categories.classification_service import ClassificationService
+from app.services.ai.rag_service import RagService
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +67,13 @@ def _to_response(cat: Category, learning: bool = False) -> CategoryResponse:
 async def _generate_embedding(
     cat: Category,
     classifier: ClassificationService,
-) -> str | None:
+) -> str:
     """Generate embedding JSON string for a category."""
-    embed_text = _build_embed_text(cat)
+    embed_text = build_category_embedding_text(cat)
     embedding_vec = await classifier.generate_category_embedding(embed_text)
-    if embedding_vec:
-        return json.dumps(embedding_vec)
-    return None
+    if not embedding_vec:
+        raise RuntimeError("Embedding generation returned no vector.")
+    return json.dumps(embedding_vec)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────
@@ -120,7 +124,10 @@ async def create_category(
         destination_path=body.folder_path,
         color=body.color or "#6366f1",
     )
-    cat.embedding = await _generate_embedding(cat, classifier)
+    try:
+        cat.embedding = await _generate_embedding(cat, classifier)
+    except AiCapabilityUnavailableError as exc:
+        raise to_service_unavailable_http_exception(exc) from exc
 
     db.add(cat)
     await db.flush()
@@ -175,7 +182,10 @@ async def update_category(
             need_re_embed = True
 
     if need_re_embed:
-        cat.embedding = await _generate_embedding(cat, classifier)
+        try:
+            cat.embedding = await _generate_embedding(cat, classifier)
+        except AiCapabilityUnavailableError as exc:
+            raise to_service_unavailable_http_exception(exc) from exc
 
     await db.flush()
     logger.info("Updated category: %s (re-embed=%s)", cat.name, need_re_embed)
@@ -216,7 +226,10 @@ async def batch_create_categories(
             destination_path=item.folder_path,
             color=item.color or "#6366f1",
         )
-        cat.embedding = await _generate_embedding(cat, classifier)
+        try:
+            cat.embedding = await _generate_embedding(cat, classifier)
+        except AiCapabilityUnavailableError as exc:
+            raise to_service_unavailable_http_exception(exc) from exc
         db.add(cat)
         created += 1
 

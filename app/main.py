@@ -8,7 +8,7 @@ FastAPI application entry point.
   • Health-check at /health
   • Organize API at /api/organize
   • Summary API at /api/summary
-    • Settings API at /api/settings (categories, base path, init)
+        • Settings API at /api/settings (categories, base path)
   • History log at /api/history
 """
 
@@ -30,10 +30,10 @@ from app.core.config import settings
 from app.db.migrations import run_migrations
 from app.db.session import engine
 from app.services.background_ingest import ingest_worker
-from app.services.classification_service import ClassificationService
-from app.services.llm_client import llm_client
-from app.services.rag_service import RagService
-from app.services.seed_service import generate_missing_embeddings
+from app.services.categories.classification_service import ClassificationService
+from app.services.ai.llm_client import llm_client
+from app.services.ai.rag_service import RagService
+from app.services.categories.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
 from app.services.system_log_service import SystemLogService
 
@@ -122,19 +122,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await run_migrations()
     cleaned_system_logs = await _cleanup_system_logs()
 
-    # ── 3. Load GGUF model in-process (llama-cpp-python) ─────────────
+    # ── 3. Connect to llama-server (out-of-process) ───────────────────
     try:
-        llm_client.startup()
+        await llm_client.startup()
     except Exception:
         logger.warning(
-            "llama-cpp-python model failed to load — "
-            "the API will work without AI features.",
+            "llama-server connection failed — the API will work without AI features.",
             exc_info=True,
         )
         await _write_system_log(
             level="WARNING",
             event_type="llm_startup_failed",
-            message="llama-cpp-python model failed to load at startup.",
+            message="llama-server connection failed at startup.",
             context={"component": "llm_client"},
         )
 
@@ -169,10 +168,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 context={"component": "background_ingest"},
             )
 
-    # ── 5. Run startup checks (DB, llama-cpp-python, RAG) ───────────
+    # ── 5. Run startup checks (DB, llama-server, RAG) ────────────────
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db:
-            if _rag_service.is_ready and llm_client.is_loaded:
+            if _rag_service.is_ready and llm_client.supports_embeddings:
                 classifier = ClassificationService(_rag_service)
                 embedded = await generate_missing_embeddings(db, classifier)
                 if embedded > 0:
@@ -199,7 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         context={
             "version": settings.app_version,
             "rag_ready": _rag_service.is_ready,
-            "llm_loaded": llm_client.is_loaded,
+            "llm_loaded": llm_client.is_ready,
             "cleaned_system_logs": cleaned_system_logs,
             "checks": {
                 result.name: {"ok": result.ok, "detail": result.detail}
@@ -208,14 +207,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         },
     )
 
-    # NOTE: Category seeding is done via PUT /api/settings/initial-base-path,
+    # NOTE: Category seeding is done via PUT /api/settings/default-base-path,
     # which the Tauri frontend calls on launch.
 
     yield  # ← application runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────
     await ingest_worker.stop()
-    llm_client.shutdown()
+    await llm_client.shutdown()
     await _write_system_log(
         level="INFO",
         event_type="app_shutdown",
@@ -255,16 +254,17 @@ app.include_router(search_router)
 
 # ── Health check ─────────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health() -> dict:
-    checks = {
-        r.name: {"ok": r.ok, "detail": r.detail}
-        for r in _startup_checks
+    checks = {r.name: {"ok": r.ok, "detail": r.detail} for r in _startup_checks}
+    checks["FastAPI"] = {
+        "ok": True,
+        "detail": f"{settings.app_name} v{settings.app_version} is running",
     }
     all_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
     return {
         "status": "ok" if all_ok else "degraded",
         "version": settings.app_version,
         "services": checks,
-        "rag_ready": _rag_service.is_ready,
     }

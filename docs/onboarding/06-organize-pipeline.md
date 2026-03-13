@@ -68,7 +68,7 @@ Let's walk through a concrete example:
 
 ### Setup: default categories are auto-seeded in the startup flow
 
-On first startup, `seed_service.py` inserts 12 default categories with rich keywords. For example:
+On first startup, `seed_service.py` inserts the default categories with rich keywords. For example:
 
 ```
 "Finance & Invoices" (is_default=true)

@@ -8,21 +8,6 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
-# ── Scanner ──────────────────────────────────────────────────────────────
-
-
-class FileScanResult(BaseModel):
-    """Metadata extracted by ScannerService for a single file."""
-
-    original_path: str
-    file_name: str
-    extension: str
-    size_bytes: int
-    sha256: str
-    exists: bool
-    error: Optional[str] = None
-
-
 # ── Category ─────────────────────────────────────────────────────────────
 
 
@@ -121,14 +106,6 @@ class DefaultBasePathResponse(BaseModel):
     default_base_path: Optional[str] = None
     updated_count: int = 0
     updated_categories: list[CategoryResponse] = []
-
-
-class InitialBasePathResponse(BaseModel):
-    """Response for PUT /api/settings/initial-base-path."""
-
-    default_base_path: str
-    categories_seeded: bool = False
-    categories: list[CategoryResponse] = []
 
 
 # ── Search ───────────────────────────────────────────────────────────────

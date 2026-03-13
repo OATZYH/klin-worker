@@ -181,8 +181,8 @@ async def suggest_name(self, original_name, extension, summary) -> str | None:
 ## `seed_service.py` — Default Category Seeding
 
 Seeds default categories and generates their embeddings.  
-**Called by `PUT /api/settings/initial-base-path`** (not at startup) so the
-Tauri frontend can supply the OS-specific base path first.
+**Called by `PUT /api/settings/default-base-path`** during first-run setup,
+so the Tauri frontend can supply the OS-specific base path first.
 
 ```python
 # Default categories store both prose and keyword phrases inside `description`

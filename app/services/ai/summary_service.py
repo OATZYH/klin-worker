@@ -1,7 +1,7 @@
 """
 Summary Service — AI-generated file summaries.
 
-Asks the local LLM (via llama-cpp-python, in-process) to produce a concise
+Asks the local LLM (via llama-server, out-of-process) to produce a concise
 one-paragraph summary of a file based on its content retrieved from the RAG engine.
 
 Optimisations vs. the original implementation:
@@ -19,13 +19,18 @@ from typing import Any
 
 import aiofiles
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
-from app.services.llm_client import llm_client
+from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
 
 # Max chars to read directly from a text file when RAG has no context
 _DIRECT_READ_MAX_CHARS = 2000
+
+# Minimum RAG context length to be considered useful — prevents feeding
+# garbage like page numbers ("1", "2") to the LLM as context
+_MIN_RAG_CONTEXT_CHARS = 40
 
 # Extensions we consider "plain text" for direct-read fallback
 _TEXT_EXTENSIONS = {
@@ -81,6 +86,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Summary generation failed for %s: %s", file_path, exc)
             return None
@@ -137,6 +144,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Vision summary failed for %s: %s", p.name, exc)
             return await self._summarise_image_text_fallback(p)
@@ -157,6 +166,8 @@ class SummaryService:
                 max_tokens=settings.summary_max_tokens,
             )
             return content.strip() or None
+        except AiCapabilityUnavailableError:
+            raise
         except Exception as exc:
             logger.error("Image text-fallback summary failed for %s: %s", p.name, exc)
             return None
@@ -203,9 +214,17 @@ class SummaryService:
                 max_content_chars=settings.summary_context_max_chars,
             )
             if results:
-                return "\n".join(
+                context = "\n".join(
                     r.get("content", str(r)) if isinstance(r, dict) else str(r)
                     for r in results
+                )
+                # Reject trivially short results (page numbers, single tokens, etc.)
+                if len(context.strip()) >= _MIN_RAG_CONTEXT_CHARS:
+                    return context
+                logger.debug(
+                    "RAG context too short (%d chars) for %s — falling back to direct read",
+                    len(context.strip()),
+                    p.name,
                 )
         except Exception as exc:
             logger.warning("RAG query for summary context failed: %s", exc)

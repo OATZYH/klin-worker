@@ -16,7 +16,7 @@ from typing import Optional
 import aiofiles
 
 from app.core.config import settings
-from app.models.response import FileScanResult
+from app.services.files.scan_result import ScanResult
 
 
 class ScannerService:
@@ -24,11 +24,11 @@ class ScannerService:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    async def scan(self, file_path: str) -> FileScanResult:
+    async def scan(self, file_path: str) -> ScanResult:
         """
         Scan a single file and return its metadata.
 
-        Raises nothing — errors are captured in `FileScanResult.error`.
+        Raises nothing — errors are captured in `ScanResult.error`.
         """
         path = Path(file_path)
 
@@ -52,7 +52,7 @@ class ScannerService:
             stat = path.stat()
             sha256 = await self._hash_file(path)
 
-            return FileScanResult(
+            return ScanResult(
                 original_path=str(path.resolve()),
                 file_name=path.name,
                 extension=path.suffix.lower(),
@@ -63,7 +63,7 @@ class ScannerService:
         except Exception as exc:
             return self._error_result(file_path, f"Scan failed: {exc}")
 
-    async def scan_many(self, file_paths: list[str]) -> list[FileScanResult]:
+    async def scan_many(self, file_paths: list[str]) -> list[ScanResult]:
         """Scan multiple files sequentially (keeps I/O predictable)."""
         return [await self.scan(fp) for fp in file_paths]
 
@@ -108,8 +108,8 @@ class ScannerService:
     # ── Helpers ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def _error_result(file_path: str, error: str) -> FileScanResult:
-        return FileScanResult(
+    def _error_result(file_path: str, error: str) -> ScanResult:
+        return ScanResult(
             original_path=file_path,
             file_name=Path(file_path).name if file_path else "",
             extension="",

@@ -92,21 +92,17 @@ class Settings(BaseSettings):
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
-    # ── llama-cpp-python (in-process GGUF model) ───────────────────────
-    llamacpp_model_path: str = "models/Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf"
-    llamacpp_n_ctx: int = 4096
-    llamacpp_n_gpu_layers: int = -1           # -1 = offload all layers to GPU
-    llamacpp_n_batch: int = 512
-    llamacpp_n_threads: Optional[int] = None  # None = auto-detect
-    llamacpp_embedding_dim: int = 2048        # model-native embedding dim
-    llamacpp_max_token_size: int = 4096
-    llamacpp_verbose: bool = False
+    # ── llama-server (out-of-process, managed by Tauri) ────────────────
+    llama_server_url: str = "http://127.0.0.1:8080/"
+    embedding_dim_size: int = 2048        # must match model served by llama-server
+    max_token_limit: int = 4096           # used for RAG chunking
 
     # ── Organize pipeline tuning ────────────────────────────────────────
     summary_rag_top_k: int = 2
     summary_context_max_chars: int = 1200
     summary_max_tokens: int = 192
     rename_max_tokens: int = 48
+    rag_llm_max_tokens: int = 256
 
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
@@ -137,16 +133,12 @@ class Settings(BaseSettings):
     # ── Resolved accessors ─────────────────────────────────────────────
 
     @property
-    def model_path(self) -> str:
-        return self.llamacpp_model_path
-
-    @property
     def embedding_dim(self) -> int:
-        return self.llamacpp_embedding_dim
+        return self.embedding_dim_size
 
     @property
     def max_token_size(self) -> int:
-        return self.llamacpp_max_token_size
+        return self.max_token_limit
 
 
 # Singleton – import this everywhere
