@@ -148,3 +148,12 @@ class NotesSummarizeRequest(BaseModel):
         default=None,
         description="Optional user-provided context for summary generation.",
     )
+
+
+class NoteHistoryCreateRequest(BaseModel):
+    """POST /api/history/note request body."""
+
+    file_name: str = Field(..., min_length=1, description="Saved note file name.")
+    destination_path: str = Field(..., min_length=1, description="Absolute path of the saved note file.")
+    source_files: list[str] = Field(default_factory=list, description="Optional source files used to build the note.")
+    category_name: str | None = Field(default=None, description="Category name when saved via category action.")

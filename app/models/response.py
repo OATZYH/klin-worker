@@ -83,6 +83,8 @@ class HistoryLogResponse(BaseModel):
     category: SelectedCategoryScoreResponse | None = None
     original_path: Optional[str] = None
     new_path: Optional[str] = None
+    source_files: list[str] | None = None
+    category_name: str | None = None
     created_at: datetime
 
 

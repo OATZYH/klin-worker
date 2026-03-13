@@ -12,6 +12,7 @@ Optimisations vs. the original implementation:
 """
 
 import base64
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,8 @@ _TEXT_EXTENSIONS = {
     ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h",
     ".rb", ".go", ".rs", ".sh", ".bat", ".ps1", ".sql",
 }
+
+_PDF_EXTENSIONS = {".pdf"}
 
 
 class SummaryService:
@@ -190,6 +193,11 @@ class SummaryService:
         if context:
             return context
 
+        # PDF fallback when RAG has not indexed useful content yet
+        context = await self._read_pdf_head(p)
+        if context:
+            return context
+
         # Last resort
         return f"Filename: {p.name}, Extension: {p.suffix}, Size: file on disk"
 
@@ -237,3 +245,34 @@ class SummaryService:
             logger.debug("Direct file read failed for %s: %s", p.name, exc)
 
         return ""
+
+    async def _read_pdf_head(self, p: Path) -> str:
+        """Extract text from the first pages of a PDF as a fallback context."""
+        if p.suffix.lower() not in _PDF_EXTENSIONS:
+            return ""
+
+        def _extract_pdf_text() -> str:
+            try:
+                from pypdf import PdfReader
+            except Exception as exc:
+                logger.debug("pypdf import unavailable for %s: %s", p.name, exc)
+                return ""
+
+            try:
+                reader = PdfReader(str(p))
+                collected: list[str] = []
+
+                # Read only first pages for speed and stability.
+                for page in reader.pages[:3]:
+                    text = page.extract_text() or ""
+                    if text.strip():
+                        collected.append(text)
+
+                merged = "\n".join(collected)
+                compact = " ".join(merged.split())
+                return compact[:_DIRECT_READ_MAX_CHARS]
+            except Exception as exc:
+                logger.debug("PDF text extraction failed for %s: %s", p.name, exc)
+                return ""
+
+        return await asyncio.to_thread(_extract_pdf_text)

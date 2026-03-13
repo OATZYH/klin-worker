@@ -10,12 +10,15 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 from pathlib import Path
+import hashlib
 
 from fastapi import APIRouter, Depends, Query
+from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import File, HistoryLog
 from app.db.session import get_db
+from app.models.request import NoteHistoryCreateRequest
 from app.models.response import (
     HistoryListResponse,
     HistoryLogResponse,
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
-USER_ACTIONS = ["renamed", "moved", "renamed_moved"]
+USER_ACTIONS = ["renamed", "moved", "renamed_moved", "note"]
 
 
 MOCK_HISTORY_ITEMS: list[dict[str, Any]] = [
@@ -114,8 +117,15 @@ async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
             )
 
     source_path = metadata.get("source_path")
-    new_path = metadata.get("new_path") or metadata.get("renamed_path") or metadata.get("moved_path")
+    new_path = (
+        metadata.get("new_path")
+        or metadata.get("destination_path")
+        or metadata.get("renamed_path")
+        or metadata.get("moved_path")
+    )
     file_name = str(metadata.get("file_name") or "")
+    source_files = metadata.get("source_files") if isinstance(metadata.get("source_files"), list) else None
+    category_name = metadata.get("category_name") if isinstance(metadata.get("category_name"), str) else None
 
     file_record = await db.get(File, log.file_id)
     current_path: str | None = None
@@ -137,8 +147,33 @@ async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
         category=category,
         original_path=original_path,
         new_path=str(new_path) if new_path else None,
+        source_files=[str(item) for item in source_files] if source_files else None,
+        category_name=category_name,
         created_at=log.created_at,
     )
+
+
+async def _get_or_create_note_file(db: AsyncSession, destination_path: str) -> File:
+    """Reuse existing file row for destination path or create a minimal one."""
+    path = destination_path.strip()
+    existing_stmt = select(File).where((File.current_path == path) | (File.original_path == path))
+    existing = await db.execute(existing_stmt)
+    file_record = existing.scalars().first()
+    if file_record:
+        return file_record
+
+    hashed = hashlib.sha256(path.encode("utf-8")).hexdigest()
+    extension = Path(path).suffix or ".md"
+    new_file = File(
+        original_path=path,
+        current_path=path,
+        hash=hashed,
+        size=0,
+        extension=extension,
+    )
+    db.add(new_file)
+    await db.flush()
+    return new_file
 
 
 # ── Routes ───────────────────────────────────────────────────────────────
@@ -185,6 +220,39 @@ async def get_file_history(
         results.append(await _enrich_log(log, db))
 
     return HistoryListResponse(results=results, limit=limit, offset=0, has_more=False)
+
+
+@router.post("/note")
+async def create_note_history(
+    body: NoteHistoryCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    history_svc: HistoryService = Depends(_get_history),
+) -> dict[str, Any]:
+    """Record a note save action in history using action='note'."""
+    destination_path = body.destination_path.strip()
+    file_record = await _get_or_create_note_file(db, destination_path)
+
+    metadata = {
+        "file_name": body.file_name.strip(),
+        "destination_path": destination_path,
+        "new_path": destination_path,
+        "source_files": [str(item) for item in body.source_files if str(item).strip()],
+        "category_name": body.category_name.strip() if isinstance(body.category_name, str) and body.category_name.strip() else None,
+    }
+
+    history = await history_svc.log(
+        db=db,
+        file_id=file_record.id,
+        action="note",
+        metadata=metadata,
+    )
+    await db.commit()
+
+    return {
+        "success": True,
+        "id": history.id,
+        "action": history.action,
+    }
 
 
 @router.get("/list")
