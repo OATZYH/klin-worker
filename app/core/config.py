@@ -116,6 +116,18 @@ class Settings(BaseSettings):
     system_log_retention_days: int = 30
     cleanup_system_logs_on_startup: bool = True
 
+    # ── Observability (Langfuse) ────────────────────────────────────────
+    langfuse_enabled: bool = False
+    langfuse_public_key: Optional[str] = None
+    langfuse_secret_key: Optional[str] = None
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_sample_rate: float = 1.0
+    langfuse_flush_at: int = 50
+    langfuse_flush_interval_seconds: float = 5.0
+    langfuse_capture_full_io_in_debug: bool = True
+    langfuse_max_text_capture_chars: int = 800
+    langfuse_mask_file_paths: bool = False
+
     # ── File Watcher (future) ────────────────────────────────────────────
     watch_directories: list[str] = []
     watch_poll_interval_seconds: int = 5

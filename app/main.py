@@ -15,9 +15,11 @@ FastAPI application entry point.
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from typing import AsyncGenerator
+from uuid import uuid4
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -37,6 +39,14 @@ from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
 from app.services.categories.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
+from app.services.observability import (
+    create_trace_id,
+    reset_request_trace_context,
+    safe_shutdown_langfuse,
+    safe_start_observation,
+    safe_update_observation,
+    set_request_trace_context,
+)
 from app.services.system_log_service import SystemLogService
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -129,76 +139,123 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
 
     # ── 2. Initialise SQLite (run Alembic migrations) ────────────────
-    await run_migrations()
-    cleaned_system_logs = await _cleanup_system_logs()
+    with safe_start_observation(
+        name="startup.database",
+        input_payload={"database_path": settings.database_path},
+    ) as span:
+        await run_migrations()
+        cleaned_system_logs = await _cleanup_system_logs()
+        safe_update_observation(
+            span,
+            output={"cleaned_system_logs": cleaned_system_logs},
+        )
 
     # ── 3. Connect to llama-server (out-of-process) ───────────────────
-    try:
-        await llm_client.startup()
-    except Exception:
-        logger.warning(
-            "llama-server connection failed — the API will work without AI features.",
-            exc_info=True,
-        )
-        await _write_system_log(
-            level="WARNING",
-            event_type="llm_startup_failed",
-            message="llama-server connection failed at startup.",
-            context={"component": "llm_client"},
-        )
-
-    # ── 4. Initialise RAG-Anything (heavy — do it once) ──────────────
-    try:
-        await _rag_service.setup()
-    except Exception:
-        logger.warning(
-            "RAG-Anything failed to initialise — "
-            "the API will work without semantic features."
-        )
-        await _write_system_log(
-            level="WARNING",
-            event_type="rag_startup_failed",
-            message="RAG service failed to initialize at startup.",
-            context={"component": "rag_service"},
-        )
-
-    # ── 4b. Start background ingest worker ───────────────────────
-    if _rag_service.is_ready:
+    with safe_start_observation(name="startup.llm_client") as span:
         try:
-            await ingest_worker.start(_rag_service)
+            await llm_client.startup()
+            safe_update_observation(span, output={"llm_ready": llm_client.is_ready})
         except Exception:
             logger.warning(
-                "Background ingest worker failed to start.",
+                "llama-server connection failed — the API will work without AI features.",
                 exc_info=True,
+            )
+            safe_update_observation(
+                span,
+                metadata={"error": "llama-server startup failed"},
             )
             await _write_system_log(
                 level="WARNING",
-                event_type="ingest_worker_start_failed",
-                message="Background ingest worker failed to start.",
-                context={"component": "background_ingest"},
+                event_type="llm_startup_failed",
+                message="llama-server connection failed at startup.",
+                context={"component": "llm_client"},
             )
 
+    # ── 4. Initialise RAG-Anything (heavy — do it once) ──────────────
+    with safe_start_observation(name="startup.rag_service") as span:
+        try:
+            await _rag_service.setup()
+            safe_update_observation(span, output={"rag_ready": _rag_service.is_ready})
+        except Exception:
+            logger.warning(
+                "RAG-Anything failed to initialise — "
+                "the API will work without semantic features."
+            )
+            safe_update_observation(
+                span,
+                metadata={"error": "rag startup failed"},
+            )
+            await _write_system_log(
+                level="WARNING",
+                event_type="rag_startup_failed",
+                message="RAG service failed to initialize at startup.",
+                context={"component": "rag_service"},
+            )
+
+    # ── 4b. Start background ingest worker ───────────────────────
+    if _rag_service.is_ready:
+        with safe_start_observation(name="startup.background_ingest") as span:
+            try:
+                await ingest_worker.start(_rag_service)
+                safe_update_observation(
+                    span,
+                    output={"worker_running": True, "queue_size": ingest_worker.queue_size},
+                )
+            except Exception:
+                logger.warning(
+                    "Background ingest worker failed to start.",
+                    exc_info=True,
+                )
+                safe_update_observation(
+                    span,
+                    metadata={"error": "background ingest worker startup failed"},
+                )
+                await _write_system_log(
+                    level="WARNING",
+                    event_type="ingest_worker_start_failed",
+                    message="Background ingest worker failed to start.",
+                    context={"component": "background_ingest"},
+                )
+
     # ── 5. Run startup checks (DB, llama-server, RAG) ────────────────
-    try:
-        async with AsyncSession(engine, expire_on_commit=False) as db:
-            if _rag_service.is_ready and llm_client.supports_embeddings:
-                classifier = ClassificationService(_rag_service)
-                embedded = await generate_missing_embeddings(db, classifier)
-                if embedded > 0:
-                    logger.info(
-                        "Generated %d missing category embeddings at startup.",
-                        embedded,
+    with safe_start_observation(name="startup.service_checks") as span:
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                if _rag_service.is_ready and llm_client.supports_embeddings:
+                    classifier = ClassificationService(_rag_service)
+                    embedded = await generate_missing_embeddings(db, classifier)
+                    if embedded > 0:
+                        logger.info(
+                            "Generated %d missing category embeddings at startup.",
+                            embedded,
+                        )
+                        await db.commit()
+                    safe_update_observation(
+                        span,
+                        metadata={"generated_missing_embeddings": embedded},
                     )
-                    await db.commit()
-            _startup_checks = await run_all_checks(db, _rag_service)
-    except Exception:
-        logger.warning("Startup checks failed to execute.", exc_info=True)
-        await _write_system_log(
-            level="WARNING",
-            event_type="startup_checks_failed",
-            message="Startup checks failed to execute.",
-            context={"component": "startup_checks"},
-        )
+                _startup_checks = await run_all_checks(db, _rag_service)
+                safe_update_observation(
+                    span,
+                    output={
+                        "checks": {
+                            result.name: {"ok": result.ok, "detail": result.detail}
+                            for result in _startup_checks
+                        }
+                    },
+                )
+        except Exception:
+            logger.warning("Startup checks failed to execute.", exc_info=True)
+            safe_update_observation(
+                span,
+                metadata={"error": "startup checks failed"},
+            )
+            await _write_system_log(
+                level="WARNING",
+                event_type="startup_checks_failed",
+                message="Startup checks failed to execute.",
+                context={"component": "startup_checks"},
+            )
 
     startup_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
     await _write_system_log(
@@ -223,17 +280,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield  # ← application runs here
 
     # ── Shutdown ─────────────────────────────────────────────────────
-    await ingest_worker.stop()
-    await llm_client.shutdown()
-    await _write_system_log(
-        level="INFO",
-        event_type="app_shutdown",
-        message="Application shutdown completed.",
-        context={
-            "version": settings.app_version,
-            "rag_ready": _rag_service.is_ready,
-        },
-    )
+    with safe_start_observation(
+        name="app.shutdown",
+        input_payload={"version": settings.app_version},
+    ) as span:
+        await ingest_worker.stop()
+        await llm_client.shutdown()
+        await _write_system_log(
+            level="INFO",
+            event_type="app_shutdown",
+            message="Application shutdown completed.",
+            context={
+                "version": settings.app_version,
+                "rag_ready": _rag_service.is_ready,
+            },
+        )
+        safe_update_observation(
+            span,
+            output={"rag_ready": _rag_service.is_ready, "shutdown": "completed"},
+        )
+
+    safe_shutdown_langfuse()
     logger.info("👋  Shutting down %s", settings.app_name)
 
 
@@ -253,6 +320,64 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def trace_requests(request: Request, call_next):
+    """Create a root trace span for each HTTP request and propagate trace context."""
+    request_id = (
+        request.headers.get("x-request-id")
+        or request.headers.get("x-correlation-id")
+        or str(uuid4())
+    )
+    trace_id = create_trace_id(request_id)
+    context_tokens = set_request_trace_context(request_id=request_id, trace_id=trace_id)
+
+    started_at = perf_counter()
+    response: Response | None = None
+
+    trace_context = {"trace_id": trace_id} if trace_id else None
+    with safe_start_observation(
+        name=f"http.{request.method.lower()} {request.url.path}",
+        trace_context=trace_context,
+        input_payload={
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "query": str(request.query_params),
+        },
+        metadata={"component": "fastapi"},
+    ) as span:
+        try:
+            response = await call_next(request)
+            return response
+        except Exception as exc:
+            safe_update_observation(
+                span,
+                metadata={
+                    "status": "error",
+                    "error": str(exc),
+                },
+            )
+            raise
+        finally:
+            elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
+            status_code = response.status_code if response else 500
+            safe_update_observation(
+                span,
+                output={"status_code": status_code},
+                metadata={
+                    "duration_ms": elapsed_ms,
+                    "request_id": request_id,
+                },
+            )
+
+            if response is not None:
+                response.headers["x-request-id"] = request_id
+                if trace_id:
+                    response.headers["x-trace-id"] = trace_id
+
+            reset_request_trace_context(context_tokens)
 
 # Routers
 app.include_router(organize_router)

@@ -56,6 +56,7 @@ from app.services.categories.classification_service import ClassificationService
 from app.services.files.text_cache import TextCache
 from app.services.history_service import HistoryService
 from app.services.ai.llm_client import llm_client
+from app.services.observability import safe_start_observation, safe_update_observation
 from app.services.ai.rag_service import RagService
 from app.services.ai.rename_service import RenameService
 from app.services.files.scanner_service import ScannerService
@@ -522,20 +523,40 @@ async def _process_single_file(
     never race against each other.
     """
     async with _file_locks[filepath]:
-        return await _process_single_file_inner(
-            filepath=filepath,
-            force=force,
-            db=db,
-            scanner=scanner,
-            rag=rag,
-            classifier=classifier,
-            summary_svc=summary_svc,
-            rename_svc=rename_svc,
-            history_svc=history_svc,
-            system_log_svc=system_log_svc,
-            text_cache=text_cache,
-            ingest=ingest,
-        )
+        with safe_start_observation(
+            name="organize.file",
+            input_payload={"file_path": filepath, "force": force},
+        ) as file_span:
+            try:
+                result = await _process_single_file_inner(
+                    filepath=filepath,
+                    force=force,
+                    db=db,
+                    scanner=scanner,
+                    rag=rag,
+                    classifier=classifier,
+                    summary_svc=summary_svc,
+                    rename_svc=rename_svc,
+                    history_svc=history_svc,
+                    system_log_svc=system_log_svc,
+                    text_cache=text_cache,
+                    ingest=ingest,
+                )
+                safe_update_observation(
+                    file_span,
+                    output={
+                        "file_id": result.file_id,
+                        "error": result.error,
+                        "category_count": len(result.categories),
+                    },
+                )
+                return result
+            except Exception as exc:
+                safe_update_observation(
+                    file_span,
+                    metadata={"status": "error", "error": str(exc)},
+                )
+                raise
 
 
 async def _process_single_file_inner(
@@ -565,9 +586,17 @@ async def _process_single_file_inner(
     }
 
     # ── Step 1: Scan ─────────────────────────────────────────────────
-    step_started_at = time.perf_counter()
-    scan = await scanner.scan(filepath)
-    timings["scan_ms"] = _elapsed_ms(step_started_at)
+    with safe_start_observation(
+        name="organize.step.scan",
+        metadata={"file_path": filepath},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        scan = await scanner.scan(filepath)
+        timings["scan_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"scan_ms": timings["scan_ms"], "scan_error": scan.error},
+        )
 
     if scan.error:
         timings["total_ms"] = _elapsed_ms(total_started_at)
@@ -596,33 +625,46 @@ async def _process_single_file_inner(
         )
 
     # ── Step 2: Upsert file record ───────────────────────────────────
-    step_started_at = time.perf_counter()
-    file_record = await _get_file_by_current_path(db, scan.original_path)
+    with safe_start_observation(
+        name="organize.step.upsert_file",
+        metadata={"file_path": scan.original_path},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        file_record = await _get_file_by_current_path(db, scan.original_path)
 
-    is_new_file = False
-    previous_hash = file_record.hash if file_record else None
-    if file_record:
-        # Eagerly load relationships for cache check later
-        await db.refresh(file_record, attribute_names=["analysis", "scores"])
-        file_record.hash = scan.sha256
-        file_record.size = scan.size_bytes
-        file_record.extension = scan.extension
-    else:
-        file_record = File(
-            original_path=scan.original_path,
-            current_path=scan.original_path,
-            hash=scan.sha256,
-            size=scan.size_bytes,
-            extension=scan.extension,
+        is_new_file = False
+        previous_hash = file_record.hash if file_record else None
+        if file_record:
+            # Eagerly load relationships for cache check later
+            await db.refresh(file_record, attribute_names=["analysis", "scores"])
+            file_record.hash = scan.sha256
+            file_record.size = scan.size_bytes
+            file_record.extension = scan.extension
+        else:
+            file_record = File(
+                original_path=scan.original_path,
+                current_path=scan.original_path,
+                hash=scan.sha256,
+                size=scan.size_bytes,
+                extension=scan.extension,
+            )
+            db.add(file_record)
+            is_new_file = True
+
+        await db.flush()  # assign file_record.id
+        file_changed = is_new_file or previous_hash != scan.sha256
+        pipeline["is_new_file"] = is_new_file
+        pipeline["file_changed"] = file_changed
+        timings["file_upsert_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={
+                "file_id": file_record.id,
+                "is_new_file": is_new_file,
+                "file_changed": file_changed,
+                "file_upsert_ms": timings["file_upsert_ms"],
+            },
         )
-        db.add(file_record)
-        is_new_file = True
-
-    await db.flush()  # assign file_record.id
-    file_changed = is_new_file or previous_hash != scan.sha256
-    pipeline["is_new_file"] = is_new_file
-    pipeline["file_changed"] = file_changed
-    timings["file_upsert_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 3: Cache check — instant return for unchanged files ─────
     # Three outcomes:
@@ -645,179 +687,214 @@ async def _process_single_file_inner(
 
     # ── 3a: Full cache hit ────────────────────────────────────────────
     if not file_changed and cats_hash_match and not force:
-        step_started_at = time.perf_counter()
-        pipeline["cached"] = True
-        pipeline["cache_reason"] = "full_hit"
-        pipeline["rag_status"] = "skipped_cached"
+        with safe_start_observation(
+            name="organize.step.cache_full_hit",
+            metadata={"file_id": file_record.id, "file_path": scan.original_path},
+        ) as step_span:
+            step_started_at = time.perf_counter()
+            pipeline["cached"] = True
+            pipeline["cache_reason"] = "full_hit"
+            pipeline["rag_status"] = "skipped_cached"
 
-        cached_analysis = file_record.analysis
-        assert cached_analysis is not None
-        cached_scores = file_record.scores or []
+            cached_analysis = file_record.analysis
+            assert cached_analysis is not None
+            cached_scores = file_record.scores or []
 
-        category_responses = []
-        if cached_scores:
-            cat_ids = [s.category_id for s in cached_scores]
-            _cat_id_col = getattr(Category, "id")
-            cat_result = await db.execute(
-                select(Category).where(_cat_id_col.in_(cat_ids))
+            category_responses = []
+            if cached_scores:
+                cat_ids = [s.category_id for s in cached_scores]
+                _cat_id_col = getattr(Category, "id")
+                cat_result = await db.execute(
+                    select(Category).where(_cat_id_col.in_(cat_ids))
+                )
+                cat_map = {c.id: c for c in cat_result.scalars().all()}
+                score_dicts = sorted(
+                    [
+                        {"category_id": s.category_id, "name": cat_map[s.category_id].name, "score": s.score}
+                        for s in cached_scores
+                        if s.category_id in cat_map
+                    ],
+                    key=lambda x: x["score"],
+                    reverse=True,
+                )
+                category_responses = _build_category_responses(score_dicts)
+            else:
+                score_dicts = []
+
+            timings["cache_lookup_ms"] = _elapsed_ms(step_started_at)
+
+            cached_names: list[str] = []
+            if cached_analysis.suggested_names:
+                try:
+                    cached_names = json.loads(cached_analysis.suggested_names)
+                except (json.JSONDecodeError, TypeError):
+                    cached_names = [cached_analysis.suggested_names]
+
+            step_started_at = time.perf_counter()
+            history_metadata = _build_history_metadata(
+                suggested_names=cached_names,
+                scores=score_dicts,
+                pipeline=pipeline,
+                timings={},
             )
-            cat_map = {c.id: c for c in cat_result.scalars().all()}
-            score_dicts = sorted(
-                [
-                    {"category_id": s.category_id, "name": cat_map[s.category_id].name, "score": s.score}
-                    for s in cached_scores
-                    if s.category_id in cat_map
-                ],
-                key=lambda x: x["score"],
-                reverse=True,
+            history_entry = await history_svc.log(
+                db=db, file_id=file_record.id, action="organized_cached", metadata=history_metadata
             )
-            category_responses = _build_category_responses(score_dicts)
-        else:
-            score_dicts = []
+            timings["history_log_ms"] = _elapsed_ms(step_started_at)
+            timings["total_ms"] = _elapsed_ms(total_started_at)
+            history_metadata["timings"] = timings
+            history_entry.metadata_json = json.dumps(history_metadata)
+            await db.flush()
+            safe_update_observation(
+                step_span,
+                output={
+                    "cache_lookup_ms": timings["cache_lookup_ms"],
+                    "history_log_ms": timings["history_log_ms"],
+                    "categories": len(category_responses),
+                },
+            )
 
-        timings["cache_lookup_ms"] = _elapsed_ms(step_started_at)
-
-        cached_names: list[str] = []
-        if cached_analysis.suggested_names:
-            try:
-                cached_names = json.loads(cached_analysis.suggested_names)
-            except (json.JSONDecodeError, TypeError):
-                cached_names = [cached_analysis.suggested_names]
-
-        step_started_at = time.perf_counter()
-        history_metadata = _build_history_metadata(
-            suggested_names=cached_names,
-            scores=score_dicts,
-            pipeline=pipeline,
-            timings={},
-        )
-        history_entry = await history_svc.log(
-            db=db, file_id=file_record.id, action="organized_cached", metadata=history_metadata
-        )
-        timings["history_log_ms"] = _elapsed_ms(step_started_at)
-        timings["total_ms"] = _elapsed_ms(total_started_at)
-        history_metadata["timings"] = timings
-        history_entry.metadata_json = json.dumps(history_metadata)
-        await db.flush()
-
-        logger.info("Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings)
-        return OrganizeFileResult(
-            file_id=file_record.id,
-            analysis=FileAnalysisResponse(suggested_names=cached_names),
-            categories=category_responses,
-        )
+            logger.info("Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings)
+            return OrganizeFileResult(
+                file_id=file_record.id,
+                analysis=FileAnalysisResponse(suggested_names=cached_names),
+                categories=category_responses,
+            )
 
     # ── 3b: Partial cache — file unchanged but categories changed ─────
     if not file_changed and has_cached_analysis and not force:
-        step_started_at = time.perf_counter()
-        pipeline["cached"] = "partial"
-        pipeline["cache_reason"] = "categories_changed"
-        pipeline["rag_status"] = "skipped_unchanged"
+        with safe_start_observation(
+            name="organize.step.cache_partial_reclassify",
+            metadata={"file_id": file_record.id, "file_path": scan.original_path},
+        ) as step_span:
+            step_started_at = time.perf_counter()
+            pipeline["cached"] = "partial"
+            pipeline["cache_reason"] = "categories_changed"
+            pipeline["rag_status"] = "skipped_unchanged"
 
-        cached_analysis = file_record.analysis
-        assert cached_analysis is not None
+            cached_analysis = file_record.analysis
+            assert cached_analysis is not None
 
-        cached_names = []
-        if cached_analysis.suggested_names:
-            try:
-                cached_names = json.loads(cached_analysis.suggested_names)
-            except (json.JSONDecodeError, TypeError):
-                cached_names = [cached_analysis.suggested_names]
+            cached_names = []
+            if cached_analysis.suggested_names:
+                try:
+                    cached_names = json.loads(cached_analysis.suggested_names)
+                except (json.JSONDecodeError, TypeError):
+                    cached_names = [cached_analysis.suggested_names]
 
-        ai_check_started_at = time.perf_counter()
-        ai_errors = await _collect_organize_ai_errors(rag)
-        timings["ai_check_ms"] = _elapsed_ms(ai_check_started_at)
-        if ai_errors:
-            return await _build_ai_unavailable_result(
-                db=db,
-                system_log_svc=system_log_svc,
-                filepath=scan.original_path,
-                file_id=file_record.id,
-                suggested_names=cached_names,
-                pipeline=pipeline,
-                timings=timings,
-                total_started_at=total_started_at,
-                ai_errors=ai_errors,
-                event_type="organize_reclassify_ai_unavailable",
-                message="AI capabilities unavailable during organize re-classification.",
-            )
-        pipeline["ai_status"] = "ready"
-
-        # Re-classify only — reuse cached summary, no LLM summary call
-        scores: list[dict] = []
-        try:
-            file_embedding = await classifier.get_file_embedding(
-                scan.original_path, summary=cached_analysis.summary
-            )
-            if file_embedding:
-                scores = await classifier.classify_with_embedding(
-                    file_id=file_record.id, file_embedding=file_embedding, db=db
+            ai_check_started_at = time.perf_counter()
+            ai_errors = await _collect_organize_ai_errors(rag)
+            timings["ai_check_ms"] = _elapsed_ms(ai_check_started_at)
+            if ai_errors:
+                safe_update_observation(
+                    step_span,
+                    output={"status": "ai_unavailable", "ai_check_ms": timings["ai_check_ms"]},
                 )
-        except AiCapabilityUnavailableError as exc:
-            return await _build_ai_unavailable_result(
-                db=db,
-                system_log_svc=system_log_svc,
-                filepath=scan.original_path,
-                file_id=file_record.id,
+                return await _build_ai_unavailable_result(
+                    db=db,
+                    system_log_svc=system_log_svc,
+                    filepath=scan.original_path,
+                    file_id=file_record.id,
+                    suggested_names=cached_names,
+                    pipeline=pipeline,
+                    timings=timings,
+                    total_started_at=total_started_at,
+                    ai_errors=ai_errors,
+                    event_type="organize_reclassify_ai_unavailable",
+                    message="AI capabilities unavailable during organize re-classification.",
+                )
+            pipeline["ai_status"] = "ready"
+
+            # Re-classify only — reuse cached summary, no LLM summary call
+            scores: list[dict] = []
+            try:
+                file_embedding = await classifier.get_file_embedding(
+                    scan.original_path, summary=cached_analysis.summary
+                )
+                if file_embedding:
+                    scores = await classifier.classify_with_embedding(
+                        file_id=file_record.id, file_embedding=file_embedding, db=db
+                    )
+            except AiCapabilityUnavailableError as exc:
+                safe_update_observation(step_span, output={"status": "ai_unavailable"})
+                return await _build_ai_unavailable_result(
+                    db=db,
+                    system_log_svc=system_log_svc,
+                    filepath=scan.original_path,
+                    file_id=file_record.id,
+                    suggested_names=cached_names,
+                    pipeline=pipeline,
+                    timings=timings,
+                    total_started_at=total_started_at,
+                    ai_errors=[exc],
+                    event_type="organize_reclassify_ai_unavailable",
+                    message="AI capabilities unavailable during organize re-classification.",
+                )
+            except Exception as exc:
+                logger.error("Re-classify failed for %s: %s", scan.original_path, exc)
+                await _log_pipeline_issue(
+                    db=db,
+                    system_log_svc=system_log_svc,
+                    level="WARNING",
+                    event_type="organize_reclassify_failed",
+                    message="Category re-classification failed during organize pipeline.",
+                    filepath=scan.original_path,
+                    file_id=file_record.id,
+                    error=str(exc),
+                    pipeline=pipeline,
+                    timings=timings,
+                )
+            timings["reclassify_ms"] = _elapsed_ms(step_started_at)
+
+            # Persist updated categories_hash
+            cached_analysis.categories_hash = current_cats_hash
+            await db.flush()
+
+            category_responses = _build_category_responses(scores)
+
+            step_started_at = time.perf_counter()
+            history_metadata = _build_history_metadata(
                 suggested_names=cached_names,
+                scores=scores,
                 pipeline=pipeline,
-                timings=timings,
-                total_started_at=total_started_at,
-                ai_errors=[exc],
-                event_type="organize_reclassify_ai_unavailable",
-                message="AI capabilities unavailable during organize re-classification.",
+                timings={},
             )
-        except Exception as exc:
-            logger.error("Re-classify failed for %s: %s", scan.original_path, exc)
-            await _log_pipeline_issue(
-                db=db,
-                system_log_svc=system_log_svc,
-                level="WARNING",
-                event_type="organize_reclassify_failed",
-                message="Category re-classification failed during organize pipeline.",
-                filepath=scan.original_path,
+            history_entry = await history_svc.log(
+                db=db, file_id=file_record.id, action="organized_reclassified", metadata=history_metadata
+            )
+            timings["history_log_ms"] = _elapsed_ms(step_started_at)
+            timings["total_ms"] = _elapsed_ms(total_started_at)
+            history_metadata["timings"] = timings
+            history_entry.metadata_json = json.dumps(history_metadata)
+            await db.flush()
+            safe_update_observation(
+                step_span,
+                output={
+                    "status": "reclassified",
+                    "reclassify_ms": timings["reclassify_ms"],
+                    "categories": len(category_responses),
+                    "history_log_ms": timings["history_log_ms"],
+                },
+            )
+
+            logger.info(
+                "Organize partial cache (re-classified) | file=%s | timings=%s", scan.original_path, timings
+            )
+            return OrganizeFileResult(
                 file_id=file_record.id,
-                error=str(exc),
-                pipeline=pipeline,
-                timings=timings,
+                analysis=FileAnalysisResponse(suggested_names=cached_names),
+                categories=category_responses,
             )
-        timings["reclassify_ms"] = _elapsed_ms(step_started_at)
-
-        # Persist updated categories_hash
-        cached_analysis.categories_hash = current_cats_hash
-        await db.flush()
-
-        category_responses = _build_category_responses(scores)
-
-        step_started_at = time.perf_counter()
-        history_metadata = _build_history_metadata(
-            suggested_names=cached_names,
-            scores=scores,
-            pipeline=pipeline,
-            timings={},
-        )
-        history_entry = await history_svc.log(
-            db=db, file_id=file_record.id, action="organized_reclassified", metadata=history_metadata
-        )
-        timings["history_log_ms"] = _elapsed_ms(step_started_at)
-        timings["total_ms"] = _elapsed_ms(total_started_at)
-        history_metadata["timings"] = timings
-        history_entry.metadata_json = json.dumps(history_metadata)
-        await db.flush()
-
-        logger.info(
-            "Organize partial cache (re-classified) | file=%s | timings=%s", scan.original_path, timings
-        )
-        return OrganizeFileResult(
-            file_id=file_record.id,
-            analysis=FileAnalysisResponse(suggested_names=cached_names),
-            categories=category_responses,
-        )
 
     # ── Step 4: Live AI capability check ─────────────────────────────
-    step_started_at = time.perf_counter()
-    ai_errors = await _collect_organize_ai_errors(rag)
-    timings["ai_check_ms"] = _elapsed_ms(step_started_at)
+    with safe_start_observation(name="organize.step.ai_check") as step_span:
+        step_started_at = time.perf_counter()
+        ai_errors = await _collect_organize_ai_errors(rag)
+        timings["ai_check_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"ai_check_ms": timings["ai_check_ms"], "error_count": len(ai_errors)},
+        )
     if ai_errors:
         return await _build_ai_unavailable_result(
             db=db,
@@ -835,17 +912,25 @@ async def _process_single_file_inner(
     pipeline["ai_status"] = "ready"
 
     # ── Step 5: Enqueue background RAG ingestion (non-blocking) ──────
-    step_started_at = time.perf_counter()
-    if not rag.is_ready:
-        pipeline["rag_status"] = "not_ready"
-    elif not file_changed and not force:
-        pipeline["rag_status"] = "skipped_unchanged"
-    else:
-        enqueue_result = await ingest.enqueue(
-            filepath=scan.original_path, text_cache=text_cache
+    with safe_start_observation(
+        name="organize.step.rag_enqueue",
+        metadata={"file_path": scan.original_path},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        if not rag.is_ready:
+            pipeline["rag_status"] = "not_ready"
+        elif not file_changed and not force:
+            pipeline["rag_status"] = "skipped_unchanged"
+        else:
+            enqueue_result = await ingest.enqueue(
+                filepath=scan.original_path, text_cache=text_cache
+            )
+            pipeline["rag_status"] = enqueue_result
+        timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"rag_status": pipeline["rag_status"], "rag_enqueue_ms": timings["rag_enqueue_ms"]},
         )
-        pipeline["rag_status"] = enqueue_result
-    timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 6: Generate summary + file embedding IN PARALLEL ────────
     # Summary and embedding generation both need LLM but can overlap:
@@ -853,143 +938,181 @@ async def _process_single_file_inner(
     # - embedding uses the embed endpoint
     # We generate a preliminary embedding from filename only (no summary yet)
     # then after summary is available, compute the richer embedding.
-    step_started_at = time.perf_counter()
-    summary_text: str | None = None
-    try:
-        summary_text = await summary_svc.summarise(scan.original_path, text_cache=text_cache)
-    except AiCapabilityUnavailableError as exc:
-        return await _build_ai_unavailable_result(
-            db=db,
-            system_log_svc=system_log_svc,
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            suggested_names=[],
-            pipeline=pipeline,
-            timings=timings,
-            total_started_at=total_started_at,
-            ai_errors=[exc],
-            event_type="organize_summary_ai_unavailable",
-            message="AI capabilities unavailable during organize summary generation.",
+    with safe_start_observation(
+        name="organize.step.summary",
+        metadata={"file_path": scan.original_path},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        summary_text: str | None = None
+        try:
+            summary_text = await summary_svc.summarise(scan.original_path, text_cache=text_cache)
+        except AiCapabilityUnavailableError as exc:
+            safe_update_observation(step_span, output={"status": "ai_unavailable"})
+            return await _build_ai_unavailable_result(
+                db=db,
+                system_log_svc=system_log_svc,
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                suggested_names=[],
+                pipeline=pipeline,
+                timings=timings,
+                total_started_at=total_started_at,
+                ai_errors=[exc],
+                event_type="organize_summary_ai_unavailable",
+                message="AI capabilities unavailable during organize summary generation.",
+            )
+        except Exception as exc:
+            logger.error("Summary failed for %s: %s", scan.original_path, exc)
+            await _log_pipeline_issue(
+                db=db,
+                system_log_svc=system_log_svc,
+                level="WARNING",
+                event_type="organize_summary_failed",
+                message="AI summary generation failed during organize pipeline.",
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                error=str(exc),
+                pipeline=pipeline,
+                timings=timings,
+            )
+        timings["summary_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={
+                "summary_ms": timings["summary_ms"],
+                "summary_length": len(summary_text) if summary_text else 0,
+            },
         )
-    except Exception as exc:
-        logger.error("Summary failed for %s: %s", scan.original_path, exc)
-        await _log_pipeline_issue(
-            db=db,
-            system_log_svc=system_log_svc,
-            level="WARNING",
-            event_type="organize_summary_failed",
-            message="AI summary generation failed during organize pipeline.",
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
-        )
-    timings["summary_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 7: Generate rename suggestion ───────────────────────────
-    step_started_at = time.perf_counter()
-    suggested_names: list[str] = []
-    try:
-        suggested_names = await rename_svc.suggest_names(
-            original_name=scan.file_name,
-            extension=scan.extension,
-            summary=summary_text,
+    with safe_start_observation(
+        name="organize.step.rename",
+        metadata={"file_path": scan.original_path, "original_name": scan.file_name},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        suggested_names: list[str] = []
+        try:
+            suggested_names = await rename_svc.suggest_names(
+                original_name=scan.file_name,
+                extension=scan.extension,
+                summary=summary_text,
+            )
+        except AiCapabilityUnavailableError as exc:
+            safe_update_observation(step_span, output={"status": "ai_unavailable"})
+            return await _build_ai_unavailable_result(
+                db=db,
+                system_log_svc=system_log_svc,
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                suggested_names=[],
+                pipeline=pipeline,
+                timings=timings,
+                total_started_at=total_started_at,
+                ai_errors=[exc],
+                event_type="organize_rename_ai_unavailable",
+                message="AI capabilities unavailable during organize rename generation.",
+            )
+        except Exception as exc:
+            logger.error("Rename failed for %s: %s", scan.original_path, exc)
+            await _log_pipeline_issue(
+                db=db,
+                system_log_svc=system_log_svc,
+                level="WARNING",
+                event_type="organize_rename_failed",
+                message="Filename suggestion generation failed during organize pipeline.",
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                error=str(exc),
+                pipeline=pipeline,
+                timings=timings,
+            )
+        timings["rename_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"rename_ms": timings["rename_ms"], "suggested_name_count": len(suggested_names)},
         )
-    except AiCapabilityUnavailableError as exc:
-        return await _build_ai_unavailable_result(
-            db=db,
-            system_log_svc=system_log_svc,
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            suggested_names=[],
-            pipeline=pipeline,
-            timings=timings,
-            total_started_at=total_started_at,
-            ai_errors=[exc],
-            event_type="organize_rename_ai_unavailable",
-            message="AI capabilities unavailable during organize rename generation.",
-        )
-    except Exception as exc:
-        logger.error("Rename failed for %s: %s", scan.original_path, exc)
-        await _log_pipeline_issue(
-            db=db,
-            system_log_svc=system_log_svc,
-            level="WARNING",
-            event_type="organize_rename_failed",
-            message="Filename suggestion generation failed during organize pipeline.",
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
-        )
-    timings["rename_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 8: Store analysis (robust upsert) ──────────────────────
-    step_started_at = time.perf_counter()
-    # Store categories_hash so the cache knows which category set this was analysed against
-    names_json = json.dumps(suggested_names) if suggested_names else None
-    if not is_new_file and file_record.analysis is not None:
-        # Update existing — relationships were loaded via refresh in Step 2
-        file_record.analysis.summary = summary_text
-        file_record.analysis.suggested_names = names_json
-        file_record.analysis.categories_hash = current_cats_hash
-    else:
-        analysis = FileAnalysis(
-            file_id=file_record.id,
-            summary=summary_text,
-            suggested_names=names_json,
-            categories_hash=current_cats_hash,
-        )
-        db.add(analysis)
+    with safe_start_observation(
+        name="organize.step.save_analysis",
+        metadata={"file_id": file_record.id},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        # Store categories_hash so the cache knows which category set this was analysed against
+        names_json = json.dumps(suggested_names) if suggested_names else None
+        if not is_new_file and file_record.analysis is not None:
+            # Update existing — relationships were loaded via refresh in Step 2
+            file_record.analysis.summary = summary_text
+            file_record.analysis.suggested_names = names_json
+            file_record.analysis.categories_hash = current_cats_hash
+        else:
+            analysis = FileAnalysis(
+                file_id=file_record.id,
+                summary=summary_text,
+                suggested_names=names_json,
+                categories_hash=current_cats_hash,
+            )
+            db.add(analysis)
 
-    await db.flush()
-    timings["analysis_save_ms"] = _elapsed_ms(step_started_at)
+        await db.flush()
+        timings["analysis_save_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"analysis_save_ms": timings["analysis_save_ms"]},
+        )
 
     # ── Step 9: Classify with summary-enriched embedding ─────────────
-    step_started_at = time.perf_counter()
-    scores: list[dict] = []
-    try:
-        # Generate embedding with summary for richer semantic signal
-        file_embedding = await classifier.get_file_embedding(
-            scan.original_path, summary=summary_text
-        )
-        if file_embedding:
-            scores = await classifier.classify_with_embedding(
-                file_id=file_record.id,
-                file_embedding=file_embedding,
-                db=db,
+    with safe_start_observation(
+        name="organize.step.classify",
+        metadata={"file_path": scan.original_path, "file_id": file_record.id},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        scores: list[dict] = []
+        try:
+            # Generate embedding with summary for richer semantic signal
+            file_embedding = await classifier.get_file_embedding(
+                scan.original_path, summary=summary_text
             )
-    except AiCapabilityUnavailableError as exc:
-        return await _build_ai_unavailable_result(
-            db=db,
-            system_log_svc=system_log_svc,
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            suggested_names=suggested_names,
-            pipeline=pipeline,
-            timings=timings,
-            total_started_at=total_started_at,
-            ai_errors=[exc],
-            event_type="organize_classify_ai_unavailable",
-            message="AI capabilities unavailable during organize classification.",
+            if file_embedding:
+                scores = await classifier.classify_with_embedding(
+                    file_id=file_record.id,
+                    file_embedding=file_embedding,
+                    db=db,
+                )
+        except AiCapabilityUnavailableError as exc:
+            safe_update_observation(step_span, output={"status": "ai_unavailable"})
+            return await _build_ai_unavailable_result(
+                db=db,
+                system_log_svc=system_log_svc,
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                suggested_names=suggested_names,
+                pipeline=pipeline,
+                timings=timings,
+                total_started_at=total_started_at,
+                ai_errors=[exc],
+                event_type="organize_classify_ai_unavailable",
+                message="AI capabilities unavailable during organize classification.",
+            )
+        except Exception as exc:
+            logger.error("Classification failed for %s: %s", scan.original_path, exc)
+            await _log_pipeline_issue(
+                db=db,
+                system_log_svc=system_log_svc,
+                level="WARNING",
+                event_type="organize_classification_failed",
+                message="Classification failed during organize pipeline.",
+                filepath=scan.original_path,
+                file_id=file_record.id,
+                error=str(exc),
+                pipeline=pipeline,
+                timings=timings,
+            )
+        timings["classify_ms"] = _elapsed_ms(step_started_at)
+        safe_update_observation(
+            step_span,
+            output={"classify_ms": timings["classify_ms"], "category_count": len(scores)},
         )
-    except Exception as exc:
-        logger.error("Classification failed for %s: %s", scan.original_path, exc)
-        await _log_pipeline_issue(
-            db=db,
-            system_log_svc=system_log_svc,
-            level="WARNING",
-            event_type="organize_classification_failed",
-            message="Classification failed during organize pipeline.",
-            filepath=scan.original_path,
-            file_id=file_record.id,
-            error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
-        )
-    timings["classify_ms"] = _elapsed_ms(step_started_at)
 
     category_responses = _build_category_responses(scores)
 
@@ -1000,18 +1123,26 @@ async def _process_single_file_inner(
         pipeline=pipeline,
         timings={},
     )
-    step_started_at = time.perf_counter()
-    history_entry = await history_svc.log(
-        db=db,
-        file_id=file_record.id,
-        action="organized",
-        metadata=history_metadata,
-    )
-    timings["history_log_ms"] = _elapsed_ms(step_started_at)
-    timings["total_ms"] = _elapsed_ms(total_started_at)
-    history_metadata["timings"] = timings
-    history_entry.metadata_json = json.dumps(history_metadata)
-    await db.flush()
+    with safe_start_observation(
+        name="organize.step.history_log",
+        metadata={"file_id": file_record.id, "action": "organized"},
+    ) as step_span:
+        step_started_at = time.perf_counter()
+        history_entry = await history_svc.log(
+            db=db,
+            file_id=file_record.id,
+            action="organized",
+            metadata=history_metadata,
+        )
+        timings["history_log_ms"] = _elapsed_ms(step_started_at)
+        timings["total_ms"] = _elapsed_ms(total_started_at)
+        history_metadata["timings"] = timings
+        history_entry.metadata_json = json.dumps(history_metadata)
+        await db.flush()
+        safe_update_observation(
+            step_span,
+            output={"history_log_ms": timings["history_log_ms"], "total_ms": timings["total_ms"]},
+        )
 
     logger.info(
         "Organize complete | file=%s | new=%s | changed=%s | rag=%s | timings=%s",

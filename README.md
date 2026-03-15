@@ -113,6 +113,41 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 | `KLIN_RAG_WORKING_DIR` | `.storage/rag_storage` in source-run dev | RAG-Anything storage path |
 | `KLIN_DATABASE_PATH` | `.storage/klin.db` in source-run dev | SQLite database path |
 | `KLIN_SIMILARITY_THRESHOLD` | `0.85` | Duplicate detection threshold |
+| `KLIN_LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing instrumentation |
+| `KLIN_LANGFUSE_HOST` | `http://localhost:3000` | Langfuse base URL (local docker by default) |
+| `KLIN_LANGFUSE_PUBLIC_KEY` | _(unset)_ | Langfuse public API key (`pk-lf-*`) |
+| `KLIN_LANGFUSE_SECRET_KEY` | _(unset)_ | Langfuse secret API key (`sk-lf-*`) |
+| `KLIN_LANGFUSE_SAMPLE_RATE` | `1.0` | Trace sampling rate |
+| `KLIN_LANGFUSE_CAPTURE_FULL_IO_IN_DEBUG` | `true` | Capture full inputs/outputs only when `KLIN_DEBUG=true` |
+| `KLIN_LANGFUSE_MAX_TEXT_CAPTURE_CHARS` | `800` | Max captured text length when not in debug mode |
+
+### Langfuse Tracing (Local)
+
+1. Start local Langfuse in `langfuse-local/`.
+2. Create a project and API keys in Langfuse UI.
+3. Set these variables in your `.env`:
+
+```bash
+KLIN_LANGFUSE_ENABLED=true
+KLIN_LANGFUSE_HOST=http://localhost:3000
+KLIN_LANGFUSE_PUBLIC_KEY=pk-lf-...
+KLIN_LANGFUSE_SECRET_KEY=sk-lf-...
+```
+
+With this enabled, the worker emits:
+- Request-level traces for all HTTP routes
+- Nested spans for organize and summary workflows
+- Generation/embedding observations for AI calls
+- Background ingestion spans (linked by trace id when available)
+
+### Langfuse MCP Endpoint (Prompt/Data Platform)
+
+For Langfuse MCP clients against local docker, use:
+- URL: `http://localhost:3000/api/public/mcp`
+- Transport: `streamableHttp`
+- Auth: Basic header built from `pk-lf-...:sk-lf-...`
+
+Note: runtime tracing in this worker uses the Langfuse Python SDK; MCP is primarily for prompt/data platform operations.
 
 ---
 

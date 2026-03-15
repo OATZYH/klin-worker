@@ -32,6 +32,7 @@ from app.core.ai_exceptions import (
 from app.core.config import settings
 from app.db.session import get_db
 from app.services.ai.llm_client import llm_client
+from app.services.observability import safe_start_observation, safe_update_observation
 from app.services.ai.summary_service import SummaryService
 from app.services.summary_workflow_service import SummaryWorkflowService
 
@@ -212,48 +213,65 @@ async def summarise_files(
         logger.debug("Queued summary request item | file=%s", fp)
 
     started = perf_counter()
+    with safe_start_observation(
+        name="summary.api.request",
+        input_payload={"file_paths": body.file_paths, "force": body.force},
+    ) as span:
+        try:
+            per_file_summaries = await workflow.summarise_file_items(
+                file_paths=body.file_paths,
+                force=body.force,
+                db=db,
+            )
+        except AiCapabilityUnavailableError as exc:
+            safe_update_observation(span, metadata={"status": "ai_unavailable", "error": str(exc)})
+            raise to_service_unavailable_http_exception(exc) from exc
+        except Exception as exc:
+            logger.error("Summary request failed: %s", exc)
+            safe_update_observation(span, metadata={"status": "error", "error": str(exc)})
+            per_file_summaries = []
 
-    try:
-        per_file_summaries = await workflow.summarise_file_items(
-            file_paths=body.file_paths,
-            force=body.force,
-            db=db,
-        )
-    except AiCapabilityUnavailableError as exc:
-        raise to_service_unavailable_http_exception(exc) from exc
-    except Exception as exc:
-        logger.error("Summary request failed: %s", exc)
-        per_file_summaries = []
+        suggested_title = _build_suggested_title(body.file_paths)
 
-    suggested_title = _build_suggested_title(body.file_paths)
-
-    if not per_file_summaries:
-        elapsed_ms = int((perf_counter() - started) * 1000)
-        return SummaryResponse(
-            summary=(
+        if not per_file_summaries:
+            elapsed_ms = int((perf_counter() - started) * 1000)
+            fallback_summary = (
                 "## Overview\n"
                 "No summary could be generated from the selected files.\n\n"
                 "## Suggested Actions\n"
                 "1. Ensure files are readable and contain extractable text.\n"
                 "2. Retry after the files are ingested by the semantic engine."
-            ),
+            )
+            safe_update_observation(
+                span,
+                output={"summary_length": len(fallback_summary), "file_count": 0},
+                metadata={"processing_time_ms": elapsed_ms, "fallback": True},
+            )
+            return SummaryResponse(
+                summary=fallback_summary,
+                suggested_title=suggested_title,
+                processing_time_ms=elapsed_ms,
+            )
+
+        try:
+            combined_markdown = await _compose_markdown_summary(per_file_summaries)
+        except Exception as exc:
+            logger.warning("Combined markdown synthesis failed, using fallback format: %s", exc)
+            safe_update_observation(span, metadata={"compose_fallback": True, "compose_error": str(exc)})
+            combined_markdown = _fallback_markdown(per_file_summaries)
+
+        elapsed_ms = int((perf_counter() - started) * 1000)
+        safe_update_observation(
+            span,
+            output={"summary_length": len(combined_markdown), "file_count": len(per_file_summaries)},
+            metadata={"processing_time_ms": elapsed_ms, "fallback": False},
+        )
+
+        return SummaryResponse(
+            summary=combined_markdown,
             suggested_title=suggested_title,
             processing_time_ms=elapsed_ms,
         )
-
-    try:
-        combined_markdown = await _compose_markdown_summary(per_file_summaries)
-    except Exception as exc:
-        logger.warning("Combined markdown synthesis failed, using fallback format: %s", exc)
-        combined_markdown = _fallback_markdown(per_file_summaries)
-
-    elapsed_ms = int((perf_counter() - started) * 1000)
-
-    return SummaryResponse(
-        summary=combined_markdown,
-        suggested_title=suggested_title,
-        processing_time_ms=elapsed_ms,
-    )
 
 
 @router.post("/summary/stream")
@@ -285,41 +303,61 @@ async def summarise_files_stream(
     suggested_title = _build_suggested_title(body.file_paths)
 
     async def event_generator():
-        meta_payload = json.dumps({"suggested_title": suggested_title}, ensure_ascii=False)
-        yield f"event: meta\ndata: {meta_payload}\n\n"
+        with safe_start_observation(
+            name="summary.api.stream",
+            input_payload={"file_paths": body.file_paths, "force": body.force},
+        ) as span:
+            meta_payload = json.dumps({"suggested_title": suggested_title}, ensure_ascii=False)
+            yield f"event: meta\ndata: {meta_payload}\n\n"
 
-        if not per_file_summaries:
-            fallback_text = (
-                "## Overview\n"
-                "No summary could be generated from the selected files.\n\n"
-                "## Suggested Actions\n"
-                "1. Ensure files are readable and contain extractable text.\n"
-                "2. Retry after the files are ingested by the semantic engine."
-            )
-            yield f"event: chunk\ndata: {json.dumps({'delta': fallback_text}, ensure_ascii=False)}\n\n"
-        else:
-            prompt = _build_compose_prompt(per_file_summaries)
-            try:
-                async for token in llm_client.achat_stream(
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.25,
-                    max_tokens=max(settings.summary_max_tokens * 3, 700),
-                ):
-                    yield f"event: chunk\ndata: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
-            except Exception as exc:
-                logger.warning("Summary stream failed, using fallback format: %s", exc)
-                fallback_text = _fallback_markdown(per_file_summaries)
+            emitted_chars = 0
+            fallback_used = False
+            if not per_file_summaries:
+                fallback_text = (
+                    "## Overview\n"
+                    "No summary could be generated from the selected files.\n\n"
+                    "## Suggested Actions\n"
+                    "1. Ensure files are readable and contain extractable text.\n"
+                    "2. Retry after the files are ingested by the semantic engine."
+                )
+                emitted_chars += len(fallback_text)
+                fallback_used = True
                 yield f"event: chunk\ndata: {json.dumps({'delta': fallback_text}, ensure_ascii=False)}\n\n"
+            else:
+                prompt = _build_compose_prompt(per_file_summaries)
+                try:
+                    async for token in llm_client.achat_stream(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.25,
+                        max_tokens=max(settings.summary_max_tokens * 3, 700),
+                    ):
+                        emitted_chars += len(token)
+                        yield f"event: chunk\ndata: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
+                except Exception as exc:
+                    logger.warning("Summary stream failed, using fallback format: %s", exc)
+                    fallback_text = _fallback_markdown(per_file_summaries)
+                    emitted_chars += len(fallback_text)
+                    fallback_used = True
+                    safe_update_observation(
+                        span,
+                        metadata={"status": "stream_fallback", "error": str(exc)},
+                    )
+                    yield f"event: chunk\ndata: {json.dumps({'delta': fallback_text}, ensure_ascii=False)}\n\n"
 
-        elapsed_ms = int((perf_counter() - started) * 1000)
-        done_payload = json.dumps(
-            {
-                "processing_time_ms": elapsed_ms,
-                "suggested_title": suggested_title,
-            },
-            ensure_ascii=False,
-        )
-        yield f"event: done\ndata: {done_payload}\n\n"
+            elapsed_ms = int((perf_counter() - started) * 1000)
+            safe_update_observation(
+                span,
+                output={"emitted_chars": emitted_chars, "file_count": len(per_file_summaries)},
+                metadata={"processing_time_ms": elapsed_ms, "fallback": fallback_used},
+            )
+            done_payload = json.dumps(
+                {
+                    "processing_time_ms": elapsed_ms,
+                    "suggested_title": suggested_title,
+                },
+                ensure_ascii=False,
+            )
+            yield f"event: done\ndata: {done_payload}\n\n"
 
     return StreamingResponse(
         event_generator(),

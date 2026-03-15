@@ -20,6 +20,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import File, FileAnalysis
 from app.services.ai.llm_client import llm_client
+from app.services.observability import safe_start_observation, safe_update_observation
 from app.services.ai.summary_service import SummaryService
 
 logger = logging.getLogger(__name__)
@@ -39,14 +40,23 @@ class SummaryWorkflowService:
         db: AsyncSession,
     ) -> str:
         """Generate or reuse summaries, then combine them for the API response."""
-        per_file = await self.summarise_file_items(
-            file_paths=file_paths,
-            force=force,
-            db=db,
-        )
-        summaries = [summary for _, summary in per_file]
+        with safe_start_observation(
+            name="summary.workflow.combine",
+            input_payload={"file_count": len(file_paths), "force": force},
+        ) as span:
+            per_file = await self.summarise_file_items(
+                file_paths=file_paths,
+                force=force,
+                db=db,
+            )
+            summaries = [summary for _, summary in per_file]
+            combined = "\n\n".join(summaries) if summaries else "No summary could be generated."
 
-        return "\n\n".join(summaries) if summaries else "No summary could be generated."
+            safe_update_observation(
+                span,
+                output={"generated_file_count": len(per_file), "combined_length": len(combined)},
+            )
+            return combined
 
     async def summarise_file_items(
         self,
@@ -56,19 +66,36 @@ class SummaryWorkflowService:
         db: AsyncSession,
     ) -> list[tuple[str, str]]:
         """Generate or reuse per-file summaries with display names."""
-        await llm_client.ensure_general_available()
+        with safe_start_observation(
+            name="summary.workflow.files",
+            input_payload={"file_paths": file_paths, "force": force},
+        ) as span:
+            await llm_client.ensure_general_available()
 
-        items: list[tuple[str, str]] = []
-        for file_path in file_paths:
-            summary = await self._get_or_generate_summary(
-                db=db,
-                file_path=file_path,
-                force=force,
+            items: list[tuple[str, str]] = []
+            for file_path in file_paths:
+                with safe_start_observation(
+                    name="summary.workflow.file",
+                    metadata={"file_path": file_path, "force": force},
+                ) as file_span:
+                    summary = await self._get_or_generate_summary(
+                        db=db,
+                        file_path=file_path,
+                        force=force,
+                    )
+                    if summary:
+                        cleaned = summary.strip()
+                        items.append((Path(file_path).name, cleaned))
+                        safe_update_observation(
+                            file_span,
+                            output={"summary_length": len(cleaned)},
+                        )
+
+            safe_update_observation(
+                span,
+                output={"summaries_created": len(items), "file_count": len(file_paths)},
             )
-            if summary:
-                items.append((Path(file_path).name, summary.strip()))
-
-        return items
+            return items
 
     async def _get_or_generate_summary(
         self,
@@ -78,16 +105,33 @@ class SummaryWorkflowService:
         force: bool,
     ) -> str | None:
         """Return a cached summary when possible, otherwise generate and persist it."""
-        if not force:
-            cached = await self._get_cached_summary(db=db, file_path=file_path)
-            if cached:
-                logger.info("Summary cache hit | file=%s", file_path)
-                return cached
+        with safe_start_observation(
+            name="summary.workflow.get_or_generate",
+            metadata={"file_path": file_path, "force": force},
+        ) as span:
+            if not force:
+                cached = await self._get_cached_summary(db=db, file_path=file_path)
+                if cached:
+                    logger.info("Summary cache hit | file=%s", file_path)
+                    safe_update_observation(
+                        span,
+                        output={"cache": "hit", "summary_length": len(cached)},
+                    )
+                    return cached
 
-        summary = await self._summary_service.summarise(file_path)
-        if summary:
-            await self._persist_summary(db=db, file_path=file_path, summary=summary)
-        return summary
+            summary = await self._summary_service.summarise(file_path)
+            if summary:
+                await self._persist_summary(db=db, file_path=file_path, summary=summary)
+                safe_update_observation(
+                    span,
+                    output={"cache": "miss", "summary_length": len(summary)},
+                )
+            else:
+                safe_update_observation(
+                    span,
+                    output={"cache": "miss", "summary_length": 0},
+                )
+            return summary
 
     @staticmethod
     async def _get_cached_summary(

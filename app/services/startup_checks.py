@@ -20,6 +20,7 @@ from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.db.models import Category
 from app.services.ai.llm_client import llm_client
+from app.services.observability import auth_check_langfuse
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,14 @@ async def check_rag(rag_service) -> CheckResult:  # type: ignore[type-arg]
         return CheckResult(name=name, ok=False, detail=str(exc))
 
 
+async def check_langfuse() -> CheckResult:
+    """Verify Langfuse tracing backend availability when enabled."""
+    name = "Observability (Langfuse)"
+
+    ok, detail = auth_check_langfuse()
+    return CheckResult(name=name, ok=ok, detail=detail)
+
+
 # ── Run All ──────────────────────────────────────────────────────────────
 
 
@@ -163,6 +172,7 @@ async def run_all_checks(db: AsyncSession, rag_service) -> list[CheckResult]:  #
         await check_database(db),
         await check_llm_server(),
         await check_rag(rag_service),
+        await check_langfuse(),
     ]
 
     # ── Pretty log output ────────────────────────────────────────────

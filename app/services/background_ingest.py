@@ -22,6 +22,11 @@ from typing import Any
 
 from app.services.files.docling_parser import DoclingParser
 from app.services.files.text_cache import TextCache
+from app.services.observability import (
+    get_current_trace_id,
+    safe_start_observation,
+    safe_update_observation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +44,7 @@ class BackgroundIngestWorker:
         max_queue_size: int = 1000,
     ) -> None:
         self._parser = parser
-        self._queue: asyncio.Queue[tuple[list[dict[str, Any]], str] | None] = (
+        self._queue: asyncio.Queue[tuple[list[dict[str, Any]], str, str | None] | None] = (
             asyncio.Queue(maxsize=max_queue_size)
         )
         self._rag: Any = None
@@ -85,28 +90,44 @@ class BackgroundIngestWorker:
             ``"skipped_image"`` — image file, no docling parse needed
         """
         path = Path(filepath)
+        trace_id = get_current_trace_id()
 
         # Images bypass docling — vision model handles summary in Step 6
         if path.suffix.lower() in _IMAGE_EXTENSIONS:
             self._enqueue_rag_item(
                 [{"type": "image", "img_path": str(path), "page_idx": 0}],
                 filepath,
+                trace_id=trace_id,
             )
             return "skipped_image"
 
-        # ── Phase 1: docling parse (blocking) ────────────────────────────
-        content_list = await self._parser.parse(path)
+        with safe_start_observation(
+            name="ingest.enqueue",
+            metadata={"file_path": filepath, "queue_size": self._queue.qsize()},
+        ) as span:
+            # ── Phase 1: docling parse (blocking) ────────────────────────────
+            content_list = await self._parser.parse(path)
 
-        if not content_list:
-            logger.warning("Docling parse returned empty for %s", path.name)
-            return "parse_failed"
+            if not content_list:
+                logger.warning("Docling parse returned empty for %s", path.name)
+                safe_update_observation(span, output={"status": "parse_failed"})
+                return "parse_failed"
 
-        extracted_text = self._parser.extract_text(content_list)
-        if extracted_text:
-            text_cache.set(filepath, extracted_text)
+            extracted_text = self._parser.extract_text(content_list)
+            if extracted_text:
+                text_cache.set(filepath, extracted_text)
 
-        # ── Phase 2: enqueue for background RAG ingestion ────────────────
-        return self._enqueue_rag_item(content_list, filepath)
+            # ── Phase 2: enqueue for background RAG ingestion ────────────────
+            status = self._enqueue_rag_item(content_list, filepath, trace_id=trace_id)
+            safe_update_observation(
+                span,
+                output={
+                    "status": status,
+                    "content_items": len(content_list),
+                    "queue_size": self._queue.qsize(),
+                },
+            )
+            return status
 
     @property
     def queue_size(self) -> int:
@@ -119,11 +140,15 @@ class BackgroundIngestWorker:
     # ── Internals ────────────────────────────────────────────────────────
 
     def _enqueue_rag_item(
-        self, content_list: list[dict[str, Any]], filepath: str
+        self,
+        content_list: list[dict[str, Any]],
+        filepath: str,
+        *,
+        trace_id: str | None = None,
     ) -> str:
         """Put a parsed content list on the RAG queue (non-blocking)."""
         try:
-            self._queue.put_nowait((content_list, filepath))
+            self._queue.put_nowait((content_list, filepath, trace_id))
             self._pending.add(filepath)
             logger.debug("Enqueued for background RAG ingest: %s", filepath)
             return "queued"
@@ -142,7 +167,7 @@ class BackgroundIngestWorker:
                     self._queue.task_done()
                     break
 
-                content_list, file_path = item
+                content_list, file_path, trace_id = item
 
                 if not self._rag or not self._rag.is_ready:
                     logger.warning(
@@ -153,23 +178,42 @@ class BackgroundIngestWorker:
                     continue
 
                 started_at = time.perf_counter()
-                try:
-                    await self._ingest_to_rag(content_list, file_path)
-                    elapsed = (time.perf_counter() - started_at) * 1000
-                    logger.info(
-                        "Background RAG ingest OK: %s (%.0f ms)", file_path, elapsed
-                    )
-                except Exception as exc:
-                    elapsed = (time.perf_counter() - started_at) * 1000
-                    logger.error(
-                        "Background RAG ingest error: %s (%.0f ms): %s",
-                        file_path,
-                        elapsed,
-                        exc,
-                    )
-                finally:
-                    self._pending.discard(file_path)
-                    self._queue.task_done()
+                trace_context = {"trace_id": trace_id} if trace_id else None
+                with safe_start_observation(
+                    name="ingest.worker.process",
+                    trace_context=trace_context,
+                    metadata={
+                        "file_path": file_path,
+                        "queue_size": self._queue.qsize(),
+                        "content_items": len(content_list),
+                    },
+                ) as span:
+                    try:
+                        await self._ingest_to_rag(content_list, file_path)
+                        elapsed = (time.perf_counter() - started_at) * 1000
+                        safe_update_observation(
+                            span,
+                            output={"status": "ok", "duration_ms": round(elapsed, 2)},
+                        )
+                        logger.info(
+                            "Background RAG ingest OK: %s (%.0f ms)", file_path, elapsed
+                        )
+                    except Exception as exc:
+                        elapsed = (time.perf_counter() - started_at) * 1000
+                        safe_update_observation(
+                            span,
+                            output={"status": "error", "duration_ms": round(elapsed, 2)},
+                            metadata={"error": str(exc)},
+                        )
+                        logger.error(
+                            "Background RAG ingest error: %s (%.0f ms): %s",
+                            file_path,
+                            elapsed,
+                            exc,
+                        )
+                    finally:
+                        self._pending.discard(file_path)
+                        self._queue.task_done()
 
             except asyncio.CancelledError:
                 break

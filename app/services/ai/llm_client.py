@@ -14,12 +14,14 @@ import json
 import logging
 import queue
 import threading
+from time import perf_counter
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.services.observability import safe_start_observation, safe_update_observation
 
 logger = logging.getLogger(__name__)
 
@@ -175,18 +177,46 @@ class LlmClient:
             "max_tokens": max_tokens or settings.max_token_size,
         }
 
-        try:
-            resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
-            resp.raise_for_status()
-            data = resp.json()
-            self._server_reachable = True
-            return data["choices"][0]["message"]["content"].strip()
-        except Exception as exc:
-            self._mark_general_unavailable()
-            raise AiCapabilityUnavailableError(
-                "general",
-                "General AI is unavailable because llama-server cannot complete chat requests.",
-            ) from exc
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.chat.completion",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": body["max_tokens"],
+            },
+            metadata={"capability": "general", "stream": False},
+        ) as observation:
+            try:
+                resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                data = resp.json()
+                self._server_reachable = True
+
+                content = data["choices"][0]["message"]["content"].strip()
+                safe_update_observation(
+                    observation,
+                    output=content,
+                    usage_details=data.get("usage"),
+                    metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
+                )
+                return content
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                self._mark_general_unavailable()
+                raise AiCapabilityUnavailableError(
+                    "general",
+                    "General AI is unavailable because llama-server cannot complete chat requests.",
+                ) from exc
 
     def chat_stream(
         self,
@@ -242,52 +272,91 @@ class LlmClient:
             "stream": True,
         }
 
-        try:
-            async with self._client.stream(  # type: ignore[union-attr]
-                "POST",
-                "/chat/completions",
-                json=body,
-            ) as resp:
-                resp.raise_for_status()
-                self._server_reachable = True
+        started_at = perf_counter()
+        collected_tokens: list[str] = []
+        usage_details: dict[str, Any] | None = None
 
-                async for raw_line in resp.aiter_lines():
-                    line = raw_line.strip()
-                    if not line:
-                        continue
+        with safe_start_observation(
+            name="llm.chat.stream",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": body["max_tokens"],
+                "stream": True,
+            },
+            metadata={"capability": "general", "stream": True},
+        ) as observation:
+            try:
+                async with self._client.stream(  # type: ignore[union-attr]
+                    "POST",
+                    "/chat/completions",
+                    json=body,
+                ) as resp:
+                    resp.raise_for_status()
+                    self._server_reachable = True
 
-                    payload = line
-                    if payload.startswith("data:"):
-                        payload = payload[len("data:"):].strip()
+                    async for raw_line in resp.aiter_lines():
+                        line = raw_line.strip()
+                        if not line:
+                            continue
 
-                    if payload == "[DONE]":
-                        break
+                        payload = line
+                        if payload.startswith("data:"):
+                            payload = payload[len("data:"):].strip()
 
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
+                        if payload == "[DONE]":
+                            break
 
-                    choices = data.get("choices", [])
-                    if not choices:
-                        continue
+                        try:
+                            data = json.loads(payload)
+                        except json.JSONDecodeError:
+                            continue
 
-                    first_choice = choices[0]
-                    delta = first_choice.get("delta") or {}
-                    content = delta.get("content")
+                        usage = data.get("usage")
+                        if isinstance(usage, dict):
+                            usage_details = usage
 
-                    if not content:
-                        message = first_choice.get("message") or {}
-                        content = message.get("content")
+                        choices = data.get("choices", [])
+                        if not choices:
+                            continue
 
-                    if isinstance(content, str) and content:
-                        yield content
-        except Exception as exc:
-            self._mark_general_unavailable()
-            raise AiCapabilityUnavailableError(
-                "general",
-                "General AI is unavailable because llama-server cannot stream chat requests.",
-            ) from exc
+                        first_choice = choices[0]
+                        delta = first_choice.get("delta") or {}
+                        content = delta.get("content")
+
+                        if not content:
+                            message = first_choice.get("message") or {}
+                            content = message.get("content")
+
+                        if isinstance(content, str) and content:
+                            collected_tokens.append(content)
+                            yield content
+
+                safe_update_observation(
+                    observation,
+                    output="".join(collected_tokens),
+                    usage_details=usage_details,
+                    metadata={
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                        "token_chunks": len(collected_tokens),
+                    },
+                )
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                self._mark_general_unavailable()
+                raise AiCapabilityUnavailableError(
+                    "general",
+                    "General AI is unavailable because llama-server cannot stream chat requests.",
+                ) from exc
 
     # ── Vision / multimodal ─────────────────────────────────────────────
 
@@ -314,29 +383,56 @@ class LlmClient:
                 max_tokens=max_tokens,
             )
 
-        try:
-            body: dict[str, Any] = {
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.chat.vision",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens or settings.max_token_size,
-            }
-            resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
-            resp.raise_for_status()
-            data = resp.json()
-            self._server_reachable = True
-            return data["choices"][0]["message"]["content"].strip()
-        except AiCapabilityUnavailableError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Vision chat failed — falling back to text-only. (%s)", exc
-            )
-            self._vision_supported = False
-            return await self.achat(
-                self._strip_images(messages),
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            },
+            metadata={"capability": "vision"},
+        ) as observation:
+            try:
+                body: dict[str, Any] = {
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens or settings.max_token_size,
+                }
+                resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                data = resp.json()
+                self._server_reachable = True
+                content = data["choices"][0]["message"]["content"].strip()
+                safe_update_observation(
+                    observation,
+                    output=content,
+                    usage_details=data.get("usage"),
+                    metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
+                )
+                return content
+            except AiCapabilityUnavailableError:
+                raise
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "fallback",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                logger.warning(
+                    "Vision chat failed — falling back to text-only. (%s)", exc
+                )
+                self._vision_supported = False
+                return await self.achat(
+                    self._strip_images(messages),
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
 
     @property
     def supports_vision(self) -> bool:
@@ -385,35 +481,66 @@ class LlmClient:
         self._assert_client_started("embedding")
 
         body: dict[str, Any] = {"input": texts}
-        try:
-            resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
-            resp.raise_for_status()
-            resp_json = resp.json()
-            # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
-            data = resp_json if isinstance(resp_json, list) else resp_json["data"]
-            self._server_reachable = True
-            self._embeddings_supported = True
-        except Exception as exc:
-            self._embeddings_supported = False
-            raise AiCapabilityUnavailableError(
-                "embedding",
-                "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
-            ) from exc
 
-        pooled: list[list[float]] = []
-        for item in data:
-            emb = item["embedding"]
-            if emb and isinstance(emb[0], list):
-                n_tokens = len(emb)
-                dim = len(emb[0])
-                avg = [
-                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
-                    for d in range(dim)
-                ]
-                pooled.append(avg)
-            else:
-                pooled.append(emb)
-        return pooled
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.embedding.create",
+            as_type="embedding",
+            model=self._model_id or "unknown",
+            input_payload={"input": texts},
+            metadata={"capability": "embedding", "input_count": len(texts)},
+        ) as observation:
+            try:
+                resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                resp_json = resp.json()
+                # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
+                data = resp_json if isinstance(resp_json, list) else resp_json["data"]
+                self._server_reachable = True
+                self._embeddings_supported = True
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                self._embeddings_supported = False
+                raise AiCapabilityUnavailableError(
+                    "embedding",
+                    "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
+                ) from exc
+
+            pooled: list[list[float]] = []
+            for item in data:
+                emb = item["embedding"]
+                if emb and isinstance(emb[0], list):
+                    n_tokens = len(emb)
+                    dim = len(emb[0])
+                    avg = [
+                        sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                        for d in range(dim)
+                    ]
+                    pooled.append(avg)
+                else:
+                    pooled.append(emb)
+
+            usage_details = None
+            if isinstance(resp_json, dict):
+                usage = resp_json.get("usage")
+                if isinstance(usage, dict):
+                    usage_details = usage
+
+            dimension = len(pooled[0]) if pooled else 0
+            safe_update_observation(
+                observation,
+                output={"embedding_count": len(pooled), "embedding_dimension": dimension},
+                usage_details=usage_details,
+                metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
+            )
+            return pooled
 
     # ── Internals ────────────────────────────────────────────────────────
 
