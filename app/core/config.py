@@ -66,6 +66,16 @@ class Settings(BaseSettings):
         "tauri://localhost",       # Tauri production
     ]
 
+    # ── Voyager UI ───────────────────────────────────────────────────────
+    voyager_enabled: bool = True
+    voyager_mount_path: str = "/voyager"
+    voyager_swagger_url: str | None = None
+    voyager_module_prefix: str | None = None
+    voyager_online_repo_url: str | None = None
+    voyager_initial_page_policy: str = "first"
+    voyager_enable_pydantic_resolve_meta: bool = False
+    voyager_module_colors: dict[str, str] = {}
+
     # ── SQLite ───────────────────────────────────────────────────────────
     database_path: str = str(_KLIN_DIR / "klin.db")
 
