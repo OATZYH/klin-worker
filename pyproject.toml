@@ -24,6 +24,7 @@ dependencies = [
     "sqlmodel>=0.0.37",
     "uvicorn>=0.41.0",
     "langfuse>=4.0.0",
+    "fastapi-voyager>=0.18.0",
 ]
 
 [project.scripts]
