@@ -31,7 +31,6 @@ from app.core.ai_exceptions import (
 )
 from app.core.config import settings
 from app.db.session import get_db
-from app.services.ai.rag_service import RagService
 from app.services.ai.llm_client import llm_client
 from app.services.ai.summary_service import SummaryService
 from app.services.summary_workflow_service import SummaryWorkflowService
@@ -69,14 +68,8 @@ class SummaryResponse(BaseModel):
 # ── Dependency Injection ─────────────────────────────────────────────────
 
 
-def _get_rag() -> RagService:
-    from app.main import get_rag_service
-
-    return get_rag_service()
-
-
-def _get_summary(rag: RagService = Depends(_get_rag)) -> SummaryService:
-    return SummaryService(rag)
+def _get_summary() -> SummaryService:
+    return SummaryService()
 
 
 def _get_summary_workflow(

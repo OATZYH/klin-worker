@@ -100,7 +100,7 @@ class Settings(BaseSettings):
     # ── Organize pipeline tuning ────────────────────────────────────────
     summary_rag_top_k: int = 2
     summary_context_max_chars: int = 1200
-    summary_max_tokens: int = 192
+    summary_max_tokens: int = 64
     rename_max_tokens: int = 48
     rag_llm_max_tokens: int = 256
 

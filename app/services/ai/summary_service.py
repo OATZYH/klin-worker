@@ -2,63 +2,42 @@
 Summary Service — AI-generated file summaries.
 
 Asks the local LLM (via llama-server, out-of-process) to produce a concise
-one-paragraph summary of a file based on its content retrieved from the RAG engine.
+one-paragraph summary of a file.
 
-Optimisations vs. the original implementation:
-  • Images go directly to the vision model — no RAG round-trip for captions.
-  • Text files have a direct-read fallback (first N chars from disk) when
-    RAG hasn't ingested the file yet (background ingest may still be running).
-  • RAG context is only used when it's actually available and non-empty.
+Text context is provided by the ``TextCache``, which is populated by the
+docling parser in the ingest worker before this service is called.
+Images go directly to the vision model — no text extraction needed.
 """
 
 import base64
-import asyncio
 import logging
 from pathlib import Path
-from typing import Any
-
-import aiofiles
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.services.ai.llm_client import llm_client
+from app.services.files.text_cache import TextCache
 
 logger = logging.getLogger(__name__)
 
-# Max chars to read directly from a text file when RAG has no context
-_DIRECT_READ_MAX_CHARS = 2000
-
-# Minimum RAG context length to be considered useful — prevents feeding
-# garbage like page numbers ("1", "2") to the LLM as context
-_MIN_RAG_CONTEXT_CHARS = 40
-
-# Extensions we consider "plain text" for direct-read fallback
-_TEXT_EXTENSIONS = {
-    ".txt", ".md", ".csv", ".json", ".xml", ".html", ".htm",
-    ".yaml", ".yml", ".toml", ".ini", ".cfg", ".log", ".py",
-    ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h",
-    ".rb", ".go", ".rs", ".sh", ".bat", ".ps1", ".sql",
-}
-
-_PDF_EXTENSIONS = {".pdf"}
+# Minimum cached text length to be considered useful
+_MIN_CACHE_CONTEXT_CHARS = 40
 
 
 class SummaryService:
     """Generate short AI summaries for files."""
 
-    def __init__(self, rag_service: Any) -> None:
-        self._rag = rag_service
-
     _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
 
-    async def summarise(self, file_path: str) -> str | None:
+    async def summarise(
+        self, file_path: str, text_cache: TextCache | None = None
+    ) -> str | None:
         """
         Generate a one-paragraph summary for a file.
 
         Strategy by file type:
-          • **Images** — send directly to the vision model (skip RAG).
-          • **Text/documents** — try RAG context first, fall back to
-            reading the first ~2 000 chars directly from disk.
+          • **Images** — send directly to the vision model.
+          • **Text/documents** — use docling-parsed text from ``text_cache``.
         """
         p = Path(file_path)
 
@@ -66,8 +45,8 @@ class SummaryService:
         if p.suffix.lower() in self._IMAGE_EXTENSIONS:
             return await self._summarise_image(p)
 
-        # ── Text / document files → RAG context + disk fallback ──────
-        context = await self._get_text_context(p)
+        # ── Text / document files → text_cache context ───────────────
+        context = self._get_text_context(p, text_cache)
 
         prompt = (
             "You are a file analysis assistant. "
@@ -107,7 +86,6 @@ class SummaryService:
             image_bytes = p.read_bytes()
             b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-            # Guess MIME type
             suffix = p.suffix.lower()
             mime_map = {
                 ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -174,105 +152,19 @@ class SummaryService:
 
     # ── Text context retrieval ───────────────────────────────────────
 
-    async def _get_text_context(self, p: Path) -> str:
-        """
-        Gather text context for summarisation.
+    @staticmethod
+    def _get_text_context(p: Path, text_cache: TextCache | None) -> str:
+        """Retrieve text context from the docling-populated cache.
 
         Priority:
-          1. RAG semantic search (if RAG is ready and returns content)
-          2. Direct file read (first N chars for known text formats)
-          3. Filename-only fallback
+          1. Docling-parsed text from ``text_cache`` (covers all formats)
+          2. Filename-only fallback (parser failed or file type unsupported)
         """
-        # Try RAG first
-        context = await self._query_rag_context(p)
-        if context:
-            return context
+        if text_cache is not None:
+            cached = text_cache.get(str(p))
+            if cached and len(cached) >= _MIN_CACHE_CONTEXT_CHARS:
+                text_cache.delete(str(p))  # free memory after consumption
+                return cached[: settings.summary_context_max_chars]
 
-        # Direct-read fallback for text files
-        context = await self._read_file_head(p)
-        if context:
-            return context
-
-        # PDF fallback when RAG has not indexed useful content yet
-        context = await self._read_pdf_head(p)
-        if context:
-            return context
-
-        # Last resort
-        return f"Filename: {p.name}, Extension: {p.suffix}, Size: file on disk"
-
-    async def _query_rag_context(self, p: Path) -> str:
-        """Query RAG for content related to the file."""
-        if not self._rag.is_ready:
-            return ""
-
-        try:
-            query = f"Content of file {p.name}"
-            results = await self._rag.semantic_search(
-                query,
-                top_k=settings.summary_rag_top_k,
-                max_content_chars=settings.summary_context_max_chars,
-            )
-            if results:
-                context = "\n".join(
-                    r.get("content", str(r)) if isinstance(r, dict) else str(r)
-                    for r in results
-                )
-                # Reject trivially short results (page numbers, single tokens, etc.)
-                if len(context.strip()) >= _MIN_RAG_CONTEXT_CHARS:
-                    return context
-                logger.debug(
-                    "RAG context too short (%d chars) for %s — falling back to direct read",
-                    len(context.strip()),
-                    p.name,
-                )
-        except Exception as exc:
-            logger.warning("RAG query for summary context failed: %s", exc)
-
-        return ""
-
-    async def _read_file_head(self, p: Path) -> str:
-        """Read the first N chars of a text file directly from disk."""
-        if p.suffix.lower() not in _TEXT_EXTENSIONS:
-            return ""
-
-        try:
-            async with aiofiles.open(str(p), mode="r", encoding="utf-8", errors="replace") as f:
-                content = await f.read(_DIRECT_READ_MAX_CHARS)
-            if content and content.strip():
-                return content.strip()
-        except Exception as exc:
-            logger.debug("Direct file read failed for %s: %s", p.name, exc)
-
-        return ""
-
-    async def _read_pdf_head(self, p: Path) -> str:
-        """Extract text from the first pages of a PDF as a fallback context."""
-        if p.suffix.lower() not in _PDF_EXTENSIONS:
-            return ""
-
-        def _extract_pdf_text() -> str:
-            try:
-                from pypdf import PdfReader
-            except Exception as exc:
-                logger.debug("pypdf import unavailable for %s: %s", p.name, exc)
-                return ""
-
-            try:
-                reader = PdfReader(str(p))
-                collected: list[str] = []
-
-                # Read only first pages for speed and stability.
-                for page in reader.pages[:3]:
-                    text = page.extract_text() or ""
-                    if text.strip():
-                        collected.append(text)
-
-                merged = "\n".join(collected)
-                compact = " ".join(merged.split())
-                return compact[:_DIRECT_READ_MAX_CHARS]
-            except Exception as exc:
-                logger.debug("PDF text extraction failed for %s: %s", p.name, exc)
-                return ""
-
-        return await asyncio.to_thread(_extract_pdf_text)
+        logger.warning("Text cache miss for %s — falling back to filename", p.name)
+        return f"Filename: {p.name}, Extension: {p.suffix}"

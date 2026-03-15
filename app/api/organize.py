@@ -51,8 +51,9 @@ from app.models.response import (
     OrganizeFileResult,
     OrganizeResponse,
 )
-from app.services.background_ingest import ingest_worker
+from app.services.background_ingest import BackgroundIngestWorker
 from app.services.categories.classification_service import ClassificationService
+from app.services.files.text_cache import TextCache
 from app.services.history_service import HistoryService
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
@@ -269,8 +270,20 @@ def _get_classifier(rag: RagService = Depends(_get_rag)) -> ClassificationServic
     return ClassificationService(rag)
 
 
-def _get_summary(rag: RagService = Depends(_get_rag)) -> SummaryService:
-    return SummaryService(rag)
+def _get_summary() -> SummaryService:
+    return SummaryService()
+
+
+def _get_text_cache() -> TextCache:
+    from app.main import get_text_cache
+
+    return get_text_cache()
+
+
+def _get_ingest_worker() -> BackgroundIngestWorker:
+    from app.main import ingest_worker
+
+    return ingest_worker
 
 
 def _get_rename() -> RenameService:
@@ -371,6 +384,8 @@ async def organize_files(
     rename_svc: RenameService = Depends(_get_rename),
     history_svc: HistoryService = Depends(_get_history),
     system_log_svc: SystemLogService = Depends(_get_system_log),
+    text_cache: TextCache = Depends(_get_text_cache),
+    ingest: BackgroundIngestWorker = Depends(_get_ingest_worker),
 ) -> OrganizeResponse:
     """
     Analyse and classify the given file paths.
@@ -406,6 +421,8 @@ async def organize_files(
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
+            text_cache=text_cache,
+            ingest=ingest,
         )
         results[filepath] = result
 
@@ -495,6 +512,8 @@ async def _process_single_file(
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
+    text_cache: TextCache,
+    ingest: BackgroundIngestWorker,
 ) -> OrganizeFileResult:
     """
     Process a single file through the optimised AI pipeline.
@@ -514,6 +533,8 @@ async def _process_single_file(
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
+            text_cache=text_cache,
+            ingest=ingest,
         )
 
 
@@ -528,6 +549,8 @@ async def _process_single_file_inner(
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
+    text_cache: TextCache,
+    ingest: BackgroundIngestWorker,
 ) -> OrganizeFileResult:
     """Core pipeline — assumes caller holds the per-file lock."""
     total_started_at = time.perf_counter()
@@ -818,8 +841,10 @@ async def _process_single_file_inner(
     elif not file_changed and not force:
         pipeline["rag_status"] = "skipped_unchanged"
     else:
-        enqueued = ingest_worker.enqueue(scan.original_path)
-        pipeline["rag_status"] = "queued" if enqueued else "queue_full"
+        enqueue_result = await ingest.enqueue(
+            filepath=scan.original_path, text_cache=text_cache
+        )
+        pipeline["rag_status"] = enqueue_result
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
     # ── Step 6: Generate summary + file embedding IN PARALLEL ────────
@@ -831,7 +856,7 @@ async def _process_single_file_inner(
     step_started_at = time.perf_counter()
     summary_text: str | None = None
     try:
-        summary_text = await summary_svc.summarise(scan.original_path)
+        summary_text = await summary_svc.summarise(scan.original_path, text_cache=text_cache)
     except AiCapabilityUnavailableError as exc:
         return await _build_ai_unavailable_result(
             db=db,
