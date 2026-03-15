@@ -29,6 +29,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aiodataloader"
+version = "0.4.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/83/1f86948638cb076969526c944b3d5f6aa1997d140dc3cff1011a821245d3/aiodataloader-0.4.3.tar.gz", hash = "sha256:b8c07ed7fddfdccc2d6298c247b1e5fe9779e5b1c38f2e6ec541a041683ef7e8", size = 14025, upload-time = "2025-11-29T10:14:10.918Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/29/80a0a91bd35b46bf31dc53a620780ee7c5b48b4dab7e60fdc4979641846a/aiodataloader-0.4.3-py3-none-any.whl", hash = "sha256:f2d57675e4c7a5cf7efc4c42697d307b951e1a9f40c22df3531a4b9cb7758229", size = 11029, upload-time = "2025-11-29T10:14:09.417Z" },
+]
+
+[[package]]
 name = "aiofiles"
 version = "25.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -937,6 +949,19 @@ wheels = [
 ]
 
 [[package]]
+name = "fastapi-voyager"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "pydantic-resolve" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3b/23/908469345dfa666ca0885e199f8e85c4ce7b2ed410b293d049ba4c6f0f65/fastapi_voyager-0.18.0.tar.gz", hash = "sha256:944d35c8e35a226c185d05bc170e41c0bd39a632805f0a7f8cbf6f506224ab63", size = 682554, upload-time = "2026-03-01T08:07:31.464Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cf/08/b834234d701e573ef778a288eb082a11147a7269be9c675f83512407a438/fastapi_voyager-0.18.0-py3-none-any.whl", hash = "sha256:fb811598b0ae8936aeeeafec997453326e217ae7c7ec75921a08fb373624f423", size = 575582, upload-time = "2026-03-01T08:07:29.985Z" },
+]
+
+[[package]]
 name = "fastar"
 version = "0.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1188,6 +1213,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a7/b2/4140c69c6a66432916b26158687e821ba631a4c9273c474343badf84d3ba/future-1.0.0.tar.gz", hash = "sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05", size = 1228490, upload-time = "2024-02-21T11:52:38.461Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/da/71/ae30dadffc90b9006d77af76b393cb9dfbfc9629f339fc1574a1c52e6806/future-1.0.0-py3-none-any.whl", hash = "sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216", size = 491326, upload-time = "2024-02-21T11:52:35.956Z" },
+]
+
+[[package]]
+name = "graphql-core"
+version = "3.2.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/68/c5/36aa96205c3ecbb3d34c7c24189e4553c7ca2ebc7e1dd07432339b980272/graphql_core-3.2.8.tar.gz", hash = "sha256:015457da5d996c924ddf57a43f4e959b0b94fb695b85ed4c29446e508ed65cf3", size = 513181, upload-time = "2026-03-05T19:55:37.332Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/86/41/cb887d9afc5dabd78feefe6ccbaf83ff423c206a7a1b7aeeac05120b2125/graphql_core-3.2.8-py3-none-any.whl", hash = "sha256:cbee07bee1b3ed5e531723685369039f32ff815ef60166686e0162f540f1520c", size = 207349, upload-time = "2026-03-05T19:55:35.911Z" },
 ]
 
 [[package]]
@@ -1549,6 +1583,7 @@ dependencies = [
     { name = "alembic" },
     { name = "docling" },
     { name = "fastapi", extra = ["standard"] },
+    { name = "fastapi-voyager" },
     { name = "greenlet" },
     { name = "httpx" },
     { name = "numpy" },
@@ -1572,6 +1607,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.18.4" },
     { name = "docling", specifier = ">=2.31.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.135.1" },
+    { name = "fastapi-voyager", specifier = ">=0.18.0" },
     { name = "greenlet", specifier = ">=3.3.2" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "numpy", specifier = ">=2.4.2" },
@@ -2824,6 +2860,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/fd/35/2fee58b1316a73e025728583d3b1447218a97e621933fc776fb8c0f2ebdd/pydantic_extra_types-2.11.0.tar.gz", hash = "sha256:4e9991959d045b75feb775683437a97991d02c138e00b59176571db9ce634f0e", size = 157226, upload-time = "2025-12-31T16:18:27.944Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/17/fabd56da47096d240dd45ba627bead0333b0cf0ee8ada9bec579287dadf3/pydantic_extra_types-2.11.0-py3-none-any.whl", hash = "sha256:84b864d250a0fc62535b7ec591e36f2c5b4d1325fa0017eb8cda9aeb63b374a6", size = 74296, upload-time = "2025-12-31T16:18:26.38Z" },
+]
+
+[[package]]
+name = "pydantic-resolve"
+version = "3.0.7"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiodataloader" },
+    { name = "graphql-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1a/ef/93227b282ae1d4aa3302cfca285ed61c3e3c80f6a4f3511ce748e2116a72/pydantic_resolve-3.0.7.tar.gz", hash = "sha256:1d8375bcc063c7eb2ef748b45ba8cb5552fd613fa59d7c041b73994ae5adb3ae", size = 1270220, upload-time = "2026-03-04T22:16:46.661Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/d4/aa8f6926b9644e5da55631bd898da4408e2f15d1446e02cfd1cb80fd44ca/pydantic_resolve-3.0.7-py3-none-any.whl", hash = "sha256:3b4692b93804ffd7a19c2b67a0b266271fb0637a56a82a41a11383d9917d855f", size = 93124, upload-time = "2026-03-04T22:16:45.325Z" },
 ]
 
 [[package]]

@@ -19,6 +19,8 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_voyager import create_voyager
+import fastapi_voyager.voyager as voyager_module
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.api.history import router as history_router
@@ -54,6 +56,24 @@ _system_log_service = SystemLogService()
 _text_cache = TextCache()
 _docling_parser = DoclingParser()
 ingest_worker = BackgroundIngestWorker(parser=_docling_parser)
+
+def _patch_fastapi_voyager_core_type_handling() -> None:
+    """Prevent voyager crashes on routes without class-based response models.
+
+    fastapi-voyager currently assumes every item returned by get_core_types()
+    is a class and calls issubclass() directly, which raises TypeError for
+    values like None or dict[str, Any]. Filter them out before analysis.
+    """
+
+    original_get_core_types = voyager_module.get_core_types
+
+    def _safe_get_core_types(tp: object) -> tuple[type, ...]:
+        core_types = original_get_core_types(tp)
+        return tuple(item for item in core_types if isinstance(item, type))
+
+    voyager_module.get_core_types = _safe_get_core_types
+
+_patch_fastapi_voyager_core_type_handling()
 
 
 def get_rag_service() -> RagService:
@@ -244,6 +264,10 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
+
+# Voyager
+voyager_app = create_voyager(app)
+app.mount("/voyager", voyager_app)
 
 # CORS — allow Tauri frontend in dev mode
 app.add_middleware(
