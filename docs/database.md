@@ -18,6 +18,21 @@ erDiagram
         DateTime updated_at "NOT NULL, UTC"
     }
 
+  watched_folders {
+    String id PK
+    Text folder_path UK "NOT NULL"
+    Boolean auto_organize_enabled "NOT NULL, true"
+    Integer frequency_value "NOT NULL, > 0"
+    String frequency_unit "NOT NULL, minute|hour|day"
+    Integer frequency_seconds "NOT NULL, > 0"
+    Boolean recursive "NOT NULL, true"
+    DateTime last_scanned_at "NULLABLE"
+    DateTime next_scan_at "NULLABLE"
+    Text last_error "NULLABLE"
+    DateTime created_at "NOT NULL, UTC"
+    DateTime updated_at "NOT NULL, UTC"
+  }
+
     categories {
         String id PK
         Text name UK "NOT NULL"
@@ -35,6 +50,7 @@ erDiagram
     files {
         String id PK
         Text original_path UK "NOT NULL"
+      Text current_path UK "NOT NULL"
         String hash "NOT NULL, SHA-256"
         Integer size "NOT NULL"
         String extension "NOT NULL"
@@ -82,63 +98,6 @@ erDiagram
     categories ||--o{ category_scores : "applied to"
 ```
 
-### ASCII
-
-```
-┌──────────────────┐
-│  app_settings    │
-├──────────────────┤
-│ key (PK)         │
-│ value            │
-│ updated_at       │
-└──────────────────┘
-
-┌──────────────┐       ┌─────────────────┐       ┌──────────────────┐
-│  categories  │       │      files      │       │  file_analysis   │
-├──────────────┤       ├─────────────────┤       ├──────────────────┤
-│ id (PK)      │       │ id (PK)         │──1:1──│ file_id (FK)     │
-│ name         │       │ original_path   │       │ id (PK)          │
-│ description  │       │ hash            │       │ summary          │
-│ color        │       │ extension       │       │ categories_hash  │
-│ dest_path    │       │ created_at      │       │ processed_at     │
-│ is_path_manual│      └────────┬────────┘       └──────────────────┘
-│ embedding    │                │
-│ is_default   │                │ 1:N
-│ is_active    │                │
-│ created_at   │                │
-│ updated_at   │                │
-└───────┬──────┘                │
-        │              ┌───────────────────┐
-        │   N:1        │  category_scores  │
-        └──────────────│ category_id (FK)  │
-                       │ file_id (FK)      │
-                       │ id (PK)           │
-                       │ score             │
-                       └───────────────────┘
-
-                       ┌───────────────────┐
-          files 1:N    │   history_logs    │
-          ─────────────│ file_id (FK)      │
-                       │ id (PK)           │
-                       │ action            │
-                       │ metadata_json     │
-                       │ created_at        │
-                       └───────────────────┘
-
-┌───────────────────┐
-│    system_logs    │
-├───────────────────┤
-│ id (PK)           │
-│ level             │
-│ component         │
-│ event_type        │
-│ message           │
-│ context_json      │
-│ correlation_id    │
-│ created_at        │
-└───────────────────┘
-```
-
 ---
 
 ## Tables
@@ -155,9 +114,42 @@ Key-value store for application-wide settings (e.g. default base path).
 
 **Known keys:**
 
-| Key                  | Example value              | Description                                        |
-| -------------------- | -------------------------- | -------------------------------------------------- |
-| `default_base_path`  | `/Users/sarun/KlinFiles`   | Base folder. Auto-applied to categories where `is_path_manual=false`. |
+| Key                           | Example value                      | Description |
+| ----------------------------- | ---------------------------------- | ----------- |
+| `default_base_path`           | `/Users/sarun/KlinFiles`           | Base folder. Auto-applied to categories where `is_path_manual=false`. |
+| `auto_organize_master_enabled`| `true`                             | Global Auto Organizing master toggle used by settings UI. |
+| `onboarding_status`           | `pending` / `base_path_set` / `seeded` / `completed` | First-run onboarding state machine. |
+| `onboarding_started_at`       | `2026-03-16T09:58:00+00:00`        | Timestamp when onboarding first started. |
+| `onboarding_seeded_at`        | `2026-03-16T09:58:04+00:00`        | Timestamp when default category seed completed. |
+| `onboarding_completed_at`     | `2026-03-16T09:58:05+00:00`        | Timestamp when onboarding was marked complete. |
+| `seed_version`                | `1`                                | Seed data version marker for future seed migrations. |
+
+---
+
+### `watched_folders`
+
+Persistent per-folder configuration for Auto Organizing.
+
+| Column                  | Type         | Constraints                     | Default  | Description |
+| ----------------------- | ------------ | ------------------------------- | -------- | ----------- |
+| `id`                    | `String`     | **PK**                          | UUID v4  | Unique watcher identifier |
+| `folder_path`           | `Text`       | NOT NULL, UNIQUE                | —        | Absolute folder path being watched |
+| `auto_organize_enabled` | `Boolean`    | NOT NULL                        | `true`   | Per-folder enable/disable switch |
+| `frequency_value`       | `Integer`    | NOT NULL, CHECK `> 0`           | `1`      | User-facing cadence value (e.g. `1`) |
+| `frequency_unit`        | `String(16)` | NOT NULL, CHECK in `minute/hour/day` | `day` | User-facing cadence unit |
+| `frequency_seconds`     | `Integer`    | NOT NULL, CHECK `> 0`           | `86400`  | Scheduler-friendly derived cadence |
+| `recursive`             | `Boolean`    | NOT NULL                        | `true`   | Whether subdirectories are included |
+| `last_scanned_at`       | `DateTime`   | NULLABLE                        | `NULL`   | Last successful scan timestamp |
+| `next_scan_at`          | `DateTime`   | NULLABLE                        | `NULL`   | Next due scan timestamp |
+| `last_error`            | `Text`       | NULLABLE                        | `NULL`   | Latest watcher error (if any) |
+| `created_at`            | `DateTime`   | NOT NULL                        | UTC now  | Row creation timestamp |
+| `updated_at`            | `DateTime`   | NOT NULL                        | UTC now  | Last modification timestamp |
+
+**Indexes/constraints:**
+
+- Unique constraint on `folder_path`
+- Composite index `ix_watched_folders_enabled_next_scan` on (`auto_organize_enabled`, `next_scan_at`)
+- Check constraints enforce positive frequency and valid `frequency_unit`
 
 ---
 
@@ -173,7 +165,7 @@ User-defined classification buckets. Each category has an embedding vector used 
 | `color`            | `String(7)`  | NOT NULL                | `"#6366f1"`      | Hex color for UI display                     |
 | `destination_path` | `Text`       | NULLABLE                | `NULL`           | Target folder for organized files. Auto-set from `default_base_path/{name}` unless manual. |
 | `is_path_manual`   | `Boolean`    | NOT NULL                | `false`          | `true` when user explicitly set `destination_path`. Auto-update from base path is skipped. |
-| `embedding`        | `Text`       | NULLABLE                | `NULL`           | JSON-serialised float list (768-dim vector)  |
+| `embedding`        | `Text`       | NULLABLE                | `NULL`           | JSON-serialised float list (model-dependent; default model uses 2048 dims) |
 | `is_default`       | `Boolean`    | NOT NULL                | `false`          | `true` for system-seeded categories. User-created categories are `false`. |
 | `is_active`        | `Boolean`    | NOT NULL                | `true`           | Soft-delete / disable toggle                 |
 | `created_at`       | `DateTime`   | NOT NULL                | UTC now          | Row creation timestamp                       |

@@ -2,6 +2,8 @@
 Request models for the Klin-Worker API.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -116,6 +118,77 @@ class DefaultBasePathUpdate(BaseModel):
         description="Absolute path to the default folder for category sub-folders.",
         examples=["/Users/sarun/KlinFiles"],
     )
+
+
+class AutoOrganizeSettingsUpdate(BaseModel):
+    """PUT /api/settings/auto-organize request body."""
+
+    enabled: bool = Field(
+        ...,
+        description="Master switch for auto-organize scheduling.",
+    )
+
+
+class WatcherFolderCreate(BaseModel):
+    """POST /api/settings/auto-organize/folders request body."""
+
+    folder_path: str = Field(
+        ...,
+        min_length=1,
+        description="Absolute folder path to watch.",
+    )
+    auto_organize_enabled: bool = Field(
+        default=True,
+        description="Whether this watcher folder is active.",
+    )
+    frequency_value: int = Field(
+        default=1,
+        ge=1,
+        le=999,
+        description="Scan cadence value. Example: 1 in '1 day'.",
+    )
+    frequency_unit: Literal["minute", "hour", "day"] = Field(
+        default="day",
+        description="Scan cadence unit.",
+    )
+    recursive: bool = Field(
+        default=True,
+        description="Whether nested folders are included.",
+    )
+
+
+class WatcherFolderUpdate(BaseModel):
+    """PATCH /api/settings/auto-organize/folders/{id} request body."""
+
+    folder_path: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Absolute folder path to watch.",
+    )
+    auto_organize_enabled: bool | None = Field(
+        default=None,
+        description="Whether this watcher folder is active.",
+    )
+    frequency_value: int | None = Field(
+        default=None,
+        ge=1,
+        le=999,
+        description="Scan cadence value. Example: 1 in '1 day'.",
+    )
+    frequency_unit: Literal["minute", "hour", "day"] | None = Field(
+        default=None,
+        description="Scan cadence unit.",
+    )
+    recursive: bool | None = Field(
+        default=None,
+        description="Whether nested folders are included.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_has_updates(self) -> "WatcherFolderUpdate":
+        if not self.model_fields_set:
+            raise ValueError("At least one field must be provided.")
+        return self
 
 
 # ── Search ───────────────────────────────────────────────────────────────

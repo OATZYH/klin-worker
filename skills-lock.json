@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "database-schema-design": {
+      "source": "supercent-io/skills-template",
+      "sourceType": "github",
+      "computedHash": "c3193721f3420d8e669ad42f33de538acc1ddaeacfceb58309f80eafb0b00752"
+    },
     "fastapi-expert": {
       "source": "jeffallan/claude-skills",
       "sourceType": "github",

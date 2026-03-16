@@ -2,12 +2,13 @@
 SQLite database models (SQLModel ORM).
 
 Tables:
-  • app_settings      — key-value application settings
-  • categories        — user-defined classification buckets
-  • files             — scanned file metadata
-  • file_analysis     — AI summary + rename suggestion per file
-  • category_scores   — AI classification score per file×category
-  • history_logs      — audit trail of every action
+    • app_settings      — key-value application settings
+    • watched_folders   — auto-organize watcher folders + scan cadence
+    • categories        — user-defined classification buckets
+    • files             — scanned file metadata
+    • file_analysis     — AI summary + rename suggestion per file
+    • category_scores   — AI classification score per file-category
+    • history_logs      — audit trail of every action
     • system_logs       — operational / application log events
 """
 
@@ -15,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import CheckConstraint, Index
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -34,6 +36,42 @@ class AppSetting(SQLModel, table=True):
 
     key: str = Field(primary_key=True)
     value: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
+
+
+class WatchedFolder(SQLModel, table=True):
+    __tablename__ = "watched_folders"  # type: ignore[assignment]
+    __table_args__ = (
+        CheckConstraint(
+            "frequency_value > 0",
+            name="ck_watched_folders_frequency_value_positive",
+        ),
+        CheckConstraint(
+            "frequency_seconds > 0",
+            name="ck_watched_folders_frequency_seconds_positive",
+        ),
+        CheckConstraint(
+            "frequency_unit IN ('minute', 'hour', 'day')",
+            name="ck_watched_folders_frequency_unit_valid",
+        ),
+        Index(
+            "ix_watched_folders_enabled_next_scan",
+            "auto_organize_enabled",
+            "next_scan_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_new_uuid, primary_key=True)
+    folder_path: str = Field(nullable=False, unique=True)
+    auto_organize_enabled: bool = Field(default=True, nullable=False)
+    frequency_value: int = Field(default=1, nullable=False)
+    frequency_unit: str = Field(default="day", max_length=16, nullable=False)
+    frequency_seconds: int = Field(default=86400, nullable=False)
+    recursive: bool = Field(default=True, nullable=False)
+    last_scanned_at: Optional[datetime] = Field(default=None)
+    next_scan_at: Optional[datetime] = Field(default=None)
+    last_error: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
 
