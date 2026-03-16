@@ -1,109 +1,98 @@
-# 🧠 Understanding RAG-Anything & LightRAG (Beginner Friendly)
+# RAG and AI Concepts (Project-Specific)
 
-> This is the core AI part. Don't worry, we'll go step by step.
+This document explains only the concepts you need to work on klin-worker effectively.
 
-## What is RAG?
+## Core Concepts
 
-**RAG = Retrieval-Augmented Generation**
+### Embedding
 
-Normal LLMs (like ChatGPT) only know what they were trained on. RAG adds a step:
+An embedding is a numeric vector representation of text. In this project, embeddings are generated through llama-server `/embeddings` and used for category scoring.
 
-1. **Store** your own documents in a searchable format
-2. **Retrieve** relevant content when you ask a question
-3. **Generate** an answer using the LLM + retrieved content
+### Cosine Similarity
 
-Think of it like giving the AI a cheat-sheet of YOUR documents before it answers.
+Classification compares vectors using cosine similarity.
 
----
+- `1.0` means very similar semantic direction
+- `0.0` means weak relation
 
-## What is an Embedding?
+API responses convert raw cosine scores to percentages (`score * 100`).
 
-An **embedding** is turning text into a list of numbers (a "vector"). For example:
+### RAG
 
-```
-"cat" → [0.23, -0.15, 0.87, 0.42, ...]   (768 numbers)
-"dog" → [0.21, -0.12, 0.85, 0.40, ...]   (768 numbers)  ← similar to "cat"!
-"car" → [0.91, 0.33, -0.45, 0.12, ...]   (768 numbers)  ← very different
-```
+RAG combines retrieval and generation:
 
-Similar meanings → similar numbers. We use this to compare files to categories!
+1. Ingest document content into retrieval storage.
+2. Retrieve relevant content.
+3. Generate responses/summaries with LLM context.
 
-The embedding model in this project is `gemma-3-1b-it-Q4_K_M.gguf` (the same model used for chat) which outputs embedding vectors from the model's hidden dimension.
+In klin-worker, RAG is used primarily for ingestion + semantic capability and embedding-backed workflows.
 
----
+## Current Implementation in klin-worker
 
-## What is Cosine Similarity?
+### LLM layer
 
-After we have embeddings (lists of numbers), we need to measure "how similar are these two texts?"
+- `app/services/ai/llm_client.py`
+- Talks to out-of-process llama-server over HTTP.
+- Provides:
+  - `achat` (chat completion)
+  - `achat_stream` (streaming)
+  - `achat_with_vision` (multimodal with fallback)
+  - `aembed` (embeddings)
 
-**Cosine similarity** measures the angle between two vectors:
-- `1.0` = identical direction (same meaning)
-- `0.0` = perpendicular (unrelated)
-- `-1.0` = opposite (opposite meaning)
+### RAG layer
 
-In this project, we embed a **file** and a **category description**, then compute cosine similarity to score how well the file matches each category.
+- `app/services/ai/rag_service.py`
+- Wraps RAG-Anything and configures:
+  - embedding function (delegates to llama-server)
+  - text completion function
+  - vision completion function
 
----
+### Document parsing and ingest
 
-## What is LightRAG?
+- `app/services/files/docling_parser.py`
+- `app/services/background_ingest.py`
 
-[LightRAG](https://github.com/HKUDS/LightRAG) is the engine underneath RAG-Anything. It:
+Pipeline design:
 
-1. **Parses** documents (PDF, Word, images, etc.)
-2. **Extracts** entities and relationships using an LLM
-3. **Builds a Knowledge Graph** — a network of connected concepts
-4. **Stores** everything locally (vectors + graph)
-5. **Answers queries** by traversing the graph + retrieving relevant chunks
+1. Inline parse with docling
+2. Put extracted text into in-memory `TextCache`
+3. Enqueue parsed content for background RAG insertion
 
----
+This keeps API latency lower while still building semantic storage.
 
-## What is RAG-Anything?
+## Why This Matters for Developers
 
-[RAG-Anything](https://github.com/RAG-Anything/RAG-Anything) is a **wrapper** around LightRAG that adds:
+1. Summary quality depends on extracted text and AI availability.
+2. Category quality depends on embedding quality and category descriptions.
+3. Organize latency is heavily affected by cache state and ingest queue behavior.
 
-- Multi-modal support (text, images, tables, etc.) including a **Visual Content Analyzer**
-- Easy configuration via `RAGAnythingConfig`
-- Simplified API: just call `process_document_complete(file_path)` to ingest
-- `vision_model_func` hook — our `_vision_complete` closure passed at init time routes image/table content to `LlmClient.achat_with_vision()` for captioning and layout analysis
+## Common Failure Modes
 
----
+1. LLM server unavailable
+   - Symptoms: AI capability errors, degraded health.
+   - Check `/health` and llama-server process.
 
-## How They Connect in Our Project
+2. Embedding endpoint unavailable
+   - Symptoms: classification failure or empty categories.
+   - Check `llm_client.ensure_embedding_available` path.
 
-```
-Our Code (rag_service.py)
-    │
-    ▼
-RAGAnything                    ← High-level wrapper
-    ├── llm_model_func             ← _llm_complete   → LlmClient.achat()
-    ├── vision_model_func          ← _vision_complete → LlmClient.achat_with_vision()
-    └── embedding_func             ← _embed          → LlmClient.aembed()
-    │
-    ▼
-LightRAG                      ← Core RAG engine
-    ├── Knowledge Graph         (entities + relationships)
-    ├── Vector Storage          (embeddings for search)
-    └── Document Parsing        (text + image/table via vision model)
-    │
-    ▼
-llama-cpp-python (in-process)   ← Provides LLM + Vision + Embeddings (no server needed)
-    ├── achat()                 → text chat completion
-    ├── achat_with_vision()     → multimodal chat (image_url blocks)
-    └── aembed()                → embedding vectors
+3. RAG not ready
+   - Symptoms: ingest not queued or semantic features skipped.
+   - Check startup logs and `RagService.setup()` outcome.
 
-Note: a vision-capable GGUF (e.g. Qwen2.5-VL-3B) is needed for full image analysis.
-Text-only models still work — LlmClient auto-detects support and falls back gracefully.
-```
+4. Parse returns empty
+   - Symptoms: weak summary fallback (filename-based context).
+   - Check docling parser logs and file format compatibility.
 
----
+## Practical Recommendation
 
-## Storage
+When debugging organize behavior, inspect this order:
 
-All RAG data is stored locally at `.storage/rag_storage/` (dev mode) or `~/.klin/rag_storage/` (production). Inside you'll find LightRAG's internal files:
-- Vector indices
-- Knowledge graph data
-- Parsed document cache
+1. Scanner output
+2. Cache branch (full hit / partial / full run)
+3. AI capability check
+4. Parse + queue status
+5. Summary/rename outputs
+6. Classification scores and history metadata
 
----
-
-**Next:** [File-by-File Walkthrough →](./03-file-walkthrough.md)
+Continue to [03-file-walkthrough.md](./03-file-walkthrough.md) for concrete file map and code navigation.

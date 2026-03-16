@@ -1,136 +1,188 @@
-# 🔄 The Full Organize Pipeline (Step-by-Step)
+# Organize Pipeline Deep Dive
 
-When the frontend sends `POST /api/organize` with `{"filepaths": ["/path/to/file.pdf"]}`:
+This document describes the live implementation in `app/api/organize.py`.
 
-```
-Step 1 — SCAN
-├── ScannerService.scan("/path/to/file.pdf")
-├── Check security (not in /System, etc.)
-├── Check file exists and is readable
-├── Extract: name="file.pdf", ext=".pdf", size=1024000
-└── Compute SHA-256 hash → "a1b2c3..."
+## Endpoint
 
-Step 2 — UPSERT FILE RECORD
-├── Check if file already exists in DB (by original_path)
-├── If yes → update hash/size/extension
-└── If no → create new File record
+`POST /api/organize`
 
-Step 3 — RAG INGEST
-├── RagService.ingest("/path/to/file.pdf")
-├── RAG-Anything parses the PDF
-├── LLM extracts entities and relationships
-└── Stored in local knowledge graph (.storage/rag_storage/)
+Input:
 
-Step 4 — AI SUMMARY
-├── SummaryService.summarise("/path/to/file.pdf")
-├── Query RAG for "Content of file file.pdf" → get context
-├── Send context + prompt to llama-cpp-python (gemma-3-1b-it)
-└── Returns: "This PDF contains a quarterly financial report..."
-
-Step 5 — AI RENAME
-├── RenameService.suggest_name("file.pdf", ".pdf", summary)
-├── Send prompt to llama-cpp-python: "suggest a descriptive filename"
-├── Sanitize LLM output with regex
-└── Returns: "quarterly_financial_report.pdf"
-
-Step 6 — STORE ANALYSIS
-├── Create/update FileAnalysis record
-└── Save summary + suggested_name to DB
-
-Step 7 — AI CLASSIFY
-├── ClassificationService.classify(file_id, path, db, summary=summary_text)
-├── Embed the file: "file .pdf. <AI summary>" → [0.23, -0.15, ...]
-│   (falls back to filename-only if no summary)
-├── Load all category embeddings from DB
-│   (each category was embedded from name + description)
-├── For each category: cosine_similarity(file_vec, cat_vec)
-├── Sort by score descending
-├── Keep top 5 (classification_top_k)
-├── Delete old scores for this file (upsert)
-└── Save new CategoryScore records to DB
-
-Step 8 — LOG HISTORY
-├── HistoryService.log("organized", {top_category, score, ...})
-└── Saved to history_logs table
-
-RETURN — OrganizeResponse
-├── filepath, file_id
-├── analysis: {summary, suggested_name}
-├── categories: [{category_id, name, score}, ...]
-└── top_category: {category_id, name, score, destination_path}
+```json
+{
+  "file_paths": ["/absolute/path/to/file.pdf"],
+  "force": false
+}
 ```
 
----
+## Per-file Execution Flow
 
-## How AI Classification Actually Works
+Each file is processed under a per-path async lock to prevent concurrent races.
 
-Let's walk through a concrete example:
+### Step 1: Scan
 
-### Setup: default categories are auto-seeded in the startup flow
+`ScannerService.scan` validates and extracts:
 
-On first startup, `seed_service.py` inserts the default categories with rich keywords. For example:
+1. normalized path
+2. filename and extension
+3. size
+4. SHA-256 hash
 
+If scan fails, return per-file error and skip remaining steps.
+
+### Step 2: Upsert file row
+
+Lookup by `files.current_path`.
+
+- existing row -> update hash/size/extension
+- missing row -> create new file row
+
+Compute flags:
+
+- `is_new_file`
+- `file_changed`
+
+### Step 3: Cache branch decision
+
+Compute active categories hash from active categories (id/name/description).
+
+#### Full cache hit
+
+Condition:
+
+- unchanged file
+- categories hash match
+- `force=false`
+
+Behavior:
+
+- return cached analysis and scores
+- write `organized_cached` history
+
+#### Partial cache reclassify
+
+Condition:
+
+- unchanged file
+- analysis exists
+- categories hash mismatch
+- `force=false`
+
+Behavior:
+
+- reuse cached summary and suggested names
+- recompute scores only
+- update categories hash
+- write `organized_reclassified` history
+
+#### Full pipeline
+
+Condition:
+
+- new file, changed file, or `force=true`
+
+Continue with steps below.
+
+### Step 4: AI capability checks
+
+Before expensive work:
+
+1. `rag.ensure_ready()`
+2. `llm_client.ensure_general_available()`
+3. `llm_client.ensure_embedding_available()`
+
+If unavailable, return structured per-file AI error.
+
+### Step 5: Enqueue ingest (non-blocking for RAG insert)
+
+`BackgroundIngestWorker.enqueue` does two things:
+
+1. Inline parse with docling
+2. Queue parsed content for background RAG insertion
+
+Status is tracked in pipeline metadata (`queued`, `queue_full`, `parse_failed`, `skipped_image`, etc.).
+
+### Step 6: Generate summary
+
+`SummaryService.summarise`:
+
+- image files -> vision flow
+- text/docs -> use `TextCache` when available
+- fallback when context is weak
+
+### Step 7: Generate rename suggestions
+
+`RenameService.suggest_names` returns a list of candidate names.
+
+### Step 8: Save analysis
+
+Upsert `file_analysis` with:
+
+1. summary
+2. suggested names (JSON list string)
+3. categories hash
+
+### Step 9: Classify
+
+`ClassificationService` builds file embedding (filename plus summary when available), compares with category embeddings, persists top-k scores.
+
+Response scores are converted to percentage format.
+
+### Step 10: Write history
+
+Write action:
+
+- `organized`
+
+History metadata includes:
+
+1. suggested names
+2. all raw scores
+3. pipeline status data
+4. per-step timings
+
+## Response Example
+
+```json
+{
+  "results": {
+    "/absolute/path/to/file.pdf": {
+      "file_id": "uuid",
+      "analysis": {
+        "suggested_names": [
+          "quarterly_finance_report.pdf",
+          "q4_financial_summary.pdf"
+        ]
+      },
+      "categories": [
+        {
+          "category_id": "uuid",
+          "name": "Finance & Invoices",
+          "score": 91.2
+        }
+      ],
+      "error": null
+    }
+  }
+}
 ```
-"Finance & Invoices" (is_default=true)
-→ Embed text: "Finance & Invoices. Financial records, transactions, billing
-   documents, payment confirmations. invoice, receipt, billing statement,
-   bank statement, tax document, ใบเสร็จ, ใบกำกับภาษี, .pdf .xlsx .csv"
-→ Stored as [0.31, -0.22, 0.78, ...] (768 numbers) in DB
-```
 
-```
-"Education & Learning" (is_default=true)
-→ Embed text: "Education & Learning. Learning materials, course content,
-   academic documents. lecture notes, study material, textbook, syllabus,
-   โน้ตเรียน, หนังสือเรียน, งานวิจัย, วิทยานิพนธ์"
-→ Stored as [0.12, 0.45, -0.33, ...] (768 numbers) in DB
-```
+## Apply Decision Follow-up
 
-You can also create custom categories via the API — they work the same way.
+After organize returns suggestions, UI calls `POST /api/organize/apply` to record user-confirmed rename/move decisions.
 
-### Classify: You organize a file
+This updates DB state (`files.current_path`) and history actions (`renamed`, `moved`, `renamed_moved`).
 
-```
-POST /api/organize
-{ "filepaths": ["/Users/you/Downloads/amazon_order_receipt.pdf"] }
-```
+## Debugging Checklist
 
-**Classification step:**
+When a result looks wrong:
 
-```
-1. AI Summary (Step 4): "This PDF is an Amazon order receipt for electronics..."
+1. Verify scanner output and hash behavior.
+2. Confirm which cache branch executed.
+3. Check AI capability status.
+4. Inspect ingest enqueue status.
+5. Inspect summary text quality.
+6. Inspect category embeddings and scores.
+7. Inspect history metadata timings.
 
-2. Embed the file: "amazon_order_receipt .pdf. This PDF is an Amazon order
-   receipt for electronics..." → [0.29, -0.20, 0.75, ...]
-   (summary enriches the embedding beyond just the filename!)
-
-3. Compare to "Finance & Invoices" (embedded with keywords: invoice, receipt, ใบเสร็จ...):
-   cosine_similarity([0.29, ...], [0.31, ...]) = 0.95  ✅ High!
-
-4. Compare to "Education & Learning" (embedded with keywords: lecture, textbook...):
-   cosine_similarity([0.29, ...], [0.12, ...]) = 0.23  ❌ Low
-
-5. Compare to all other 10 categories...
-
-6. Result: [{name: "Finance & Invoices", score: 0.95}, ...top 5 categories]
-7. Top category: "Finance & Invoices"
-```
-
-### ✅ Summary-Enhanced Embeddings
-
-File embedding now combines **filename + AI summary** when available:
-```python
-# classification_service.py
-if summary:
-    query_text = f"{p.stem} {p.suffix}. {summary}"  # rich semantic signal
-else:
-    query_text = f"{p.stem} {p.suffix}"              # filename-only fallback
-```
-
-Even a file named `document.pdf` gets classified well — the AI summary provides the semantic content.
-
-**Fallback:** If the summary step fails (e.g. RAG not ready), it falls back to filename-only.
-
----
-
-**Next:** [TODO / Improvements →](./07-todos.md)
+You can now return to [01-overview.md](./01-overview.md) and run the smoke flow end-to-end.
