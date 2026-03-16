@@ -280,8 +280,8 @@ This endpoint updates backend state and audit trail. Actual filesystem mutation 
 
 1. Validate path parent exists.
 2. Upsert base path setting.
-3. Initialize onboarding status keys in `app_settings`.
-4. If categories table is empty, seed default categories.
+3. Initialize onboarding keys in `app_settings` (including `onboarding_status` and `onboarding_seeded`).
+4. If categories table is empty, seed default categories and set `onboarding_seeded=true`.
 5. Generate missing embeddings when AI is available.
 6. Auto-update destination path for active categories where `is_path_manual=false`.
 7. Mark onboarding state as completed.

@@ -22,6 +22,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 _SETTING_DEFAULTS: dict[str, str | None] = {
     "onboarding_status": "pending",
+    "onboarding_seeded": "false",
     "onboarding_started_at": None,
     "onboarding_seeded_at": None,
     "onboarding_completed_at": None,

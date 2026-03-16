@@ -7,6 +7,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.db.models import AppSetting
 
 SETTING_KEY_ONBOARDING_STATUS = "onboarding_status"
+SETTING_KEY_ONBOARDING_SEEDED = "onboarding_seeded"
 SETTING_KEY_ONBOARDING_STARTED_AT = "onboarding_started_at"
 SETTING_KEY_ONBOARDING_SEEDED_AT = "onboarding_seeded_at"
 SETTING_KEY_ONBOARDING_COMPLETED_AT = "onboarding_completed_at"

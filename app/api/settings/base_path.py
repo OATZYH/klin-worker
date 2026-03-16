@@ -34,11 +34,13 @@ from app.models.response import (
 )
 from app.api.settings.store import (
     SETTING_KEY_ONBOARDING_COMPLETED_AT,
+    SETTING_KEY_ONBOARDING_SEEDED,
     SETTING_KEY_ONBOARDING_SEEDED_AT,
     SETTING_KEY_ONBOARDING_STARTED_AT,
     SETTING_KEY_ONBOARDING_STATUS,
     SETTING_KEY_SEED_VERSION,
     get_setting_value,
+    parse_bool_setting,
     parse_datetime_setting,
     upsert_setting_value,
 )
@@ -92,12 +94,17 @@ async def get_onboarding_status(
 ) -> OnboardingStatusResponse:
     """Get first-run onboarding and seeding state."""
     status = await get_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, default="pending")
+    onboarding_seeded = parse_bool_setting(
+        await get_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED),
+        default=False,
+    )
 
     has_categories_result = await db.execute(select(Category.id).limit(1))
     has_categories = has_categories_result.scalar_one_or_none() is not None
 
     return OnboardingStatusResponse(
         status=status or "pending",
+        onboarding_seeded=onboarding_seeded,
         started_at=parse_datetime_setting(
             await get_setting_value(db, SETTING_KEY_ONBOARDING_STARTED_AT)
         ),
@@ -146,6 +153,10 @@ async def set_default_base_path(
     if not started_at:
         await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STARTED_AT, _utcnow_iso())
 
+    onboarding_seeded = await get_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED)
+    if onboarding_seeded is None:
+        await upsert_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED, "false")
+
     await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, "base_path_set")
     await upsert_setting_value(db, SETTING_KEY_SEED_VERSION, "1")
 
@@ -180,7 +191,7 @@ async def set_default_base_path(
                     SETTING_KEY_ONBOARDING_SEEDED_AT,
                     _utcnow_iso(),
                 )
-                await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, "seeded")
+                await upsert_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED, "true")
         except AiCapabilityUnavailableError as exc:
             raise to_service_unavailable_http_exception(exc) from exc
 

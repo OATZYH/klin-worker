@@ -141,6 +141,7 @@ class OnboardingStatusResponse(BaseModel):
     """First-run onboarding and seeding status."""
 
     status: str
+    onboarding_seeded: bool = False
     started_at: datetime | None = None
     seeded_at: datetime | None = None
     completed_at: datetime | None = None

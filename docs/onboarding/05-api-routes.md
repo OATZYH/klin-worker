@@ -8,6 +8,14 @@ This file summarizes current route contracts for developers.
 
 Returns startup check results and app status.
 
+Key fields include:
+
+- `status` (`ok` or `degraded`)
+- `version`
+- `services` (startup checks)
+- `onboarding_status`
+- `onboarding_seeded`
+
 ## Organize
 
 ### `POST /api/organize`
@@ -126,6 +134,13 @@ Field conventions in request/response models:
 3. `GET /api/settings/onboarding`
 
 `PUT /default-base-path` also handles first-run category seeding when table is empty.
+
+`GET /api/settings/onboarding` includes both onboarding phase and seed state:
+
+- `status` (`pending` / `base_path_set` / `completed`)
+- `onboarding_seeded` (`true`/`false`)
+- `started_at`, `seeded_at`, `completed_at`
+- `should_seed_defaults`
 
 ## Auto organize settings and watched folders
 

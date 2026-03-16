@@ -118,7 +118,8 @@ Key-value store for application-wide settings (e.g. default base path).
 | ----------------------------- | ---------------------------------- | ----------- |
 | `default_base_path`           | `/Users/sarun/KlinFiles`           | Base folder. Auto-applied to categories where `is_path_manual=false`. |
 | `auto_organize_master_enabled`| `true`                             | Global Auto Organizing master toggle used by settings UI. |
-| `onboarding_status`           | `pending` / `base_path_set` / `seeded` / `completed` | First-run onboarding state machine. |
+| `onboarding_status`           | `pending` / `base_path_set` / `completed` | First-run onboarding state machine (seed completion is tracked separately). |
+| `onboarding_seeded`           | `true` / `false`                   | Whether default category seeding has completed at least once. |
 | `onboarding_started_at`       | `2026-03-16T09:58:00+00:00`        | Timestamp when onboarding first started. |
 | `onboarding_seeded_at`        | `2026-03-16T09:58:04+00:00`        | Timestamp when default category seed completed. |
 | `onboarding_completed_at`     | `2026-03-16T09:58:05+00:00`        | Timestamp when onboarding was marked complete. |
