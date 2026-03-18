@@ -18,6 +18,7 @@ class CategoryResponse(BaseModel):
     name: str
     description: str
     color: str
+    icon: str | None = None
     enabled: bool
     folder_path: Optional[str] = None
     learning: bool = False

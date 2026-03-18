@@ -84,6 +84,12 @@ class CategoryCreate(BaseModel):
         pattern=r"^#[0-9a-fA-F]{6}$",
         description="Hex color code, e.g. #6366f1. Defaults to #6366f1 if not provided.",
     )
+    icon: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Lucide icon name, e.g. FileText.",
+    )
     is_auto_description: bool = Field(
         default=False,
         description="True when the description was auto-generated (e.g. from folder path). Cleared when user manually edits description.",
@@ -102,6 +108,7 @@ class CategoryUpdate(BaseModel):
     enabled: bool | None = None
     folder_path: str | None = None
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    icon: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class BatchCategoryCreate(BaseModel):
