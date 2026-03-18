@@ -33,11 +33,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.db.models import AppSetting, Category, CategoryScore, File, FileAnalysis
 from app.core.ai_exceptions import (
     AiCapabilityUnavailableError,
     format_ai_capability_errors,
 )
-from app.db.models import Category, CategoryScore, File, FileAnalysis
 from app.db.session import get_db
 from app.models.request import (
     ApplyOrganizeDecisionRequest,
@@ -65,6 +65,9 @@ from app.services.system_log_service import SystemLogService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["organize"])
+
+SETTING_KEY_LOCK_FILE = "lock_file"
+SETTING_KEY_LOCK_FOLDER = "lock_folder"
 
 
 # ── Categories hash — for cache invalidation ─────────────────────────────
@@ -98,6 +101,68 @@ _file_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 2)
+
+
+def _normalize_path(value: str) -> str:
+    return value.strip().replace("\\", "/").rstrip("/").lower()
+
+
+def _decode_paths(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    output: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        text = str(item).strip()
+        if not text:
+            continue
+        key = _normalize_path(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(text)
+    return output
+
+
+async def _load_lock_settings(db: AsyncSession) -> tuple[list[str], list[str]]:
+    lock_file_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FILE)
+    lock_folder_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FOLDER)
+    return _decode_paths(lock_file_setting.value if lock_file_setting else None), _decode_paths(lock_folder_setting.value if lock_folder_setting else None)
+
+
+def _lock_reason(path: str, lock_files: list[str], lock_folders: list[str]) -> str | None:
+    normalized = _normalize_path(path)
+    if not normalized:
+        return None
+
+    for locked_file in lock_files:
+        if _normalize_path(locked_file) == normalized:
+            return f"file is directly locked: {locked_file}"
+
+    for locked_folder in lock_folders:
+        normalized_folder = _normalize_path(locked_folder)
+        if normalized == normalized_folder or normalized.startswith(f"{normalized_folder}/"):
+            return f"file is locked by folder: {locked_folder}"
+
+    return None
+
+
+def _build_locked_result(filepath: str, reason: str) -> OrganizeFileResult:
+    return OrganizeFileResult(
+        file_id=f"locked::{hashlib.md5(filepath.encode()).hexdigest()}",
+        analysis=FileAnalysisResponse(suggested_names=[]),
+        categories=[],
+        error=f"Skipped locked file: {reason}",
+    )
 
 
 async def _get_file_by_current_path(db: AsyncSession, file_path: str) -> File | None:
@@ -406,10 +471,17 @@ async def organize_files(
     logger.info(
         "Organize request — %d file(s), force=%s", len(body.file_paths), body.force
     )
+    lock_files, lock_folders = await _load_lock_settings(db)
 
     results: dict[str, OrganizeFileResult] = {}
 
     for filepath in body.file_paths:
+        reason = _lock_reason(filepath, lock_files, lock_folders)
+        if reason:
+            logger.info("Organize skipped locked file %s (%s)", filepath, reason)
+            results[filepath] = _build_locked_result(filepath, reason)
+            continue
+
         result = await _process_single_file(
             filepath=filepath,
             force=body.force,

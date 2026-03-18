@@ -89,6 +89,7 @@ class Category(SQLModel, table=True):
     is_path_manual: bool = Field(default=False, nullable=False)  # True when user set path manually
     embedding: Optional[str] = Field(default=None)  # JSON-serialised float list
     is_default: bool = Field(default=False, nullable=False)  # Seeded by system
+    is_auto_description: bool = Field(default=False, nullable=False)  # True when description was auto-generated from folder path
     is_active: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)

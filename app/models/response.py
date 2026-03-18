@@ -21,6 +21,7 @@ class CategoryResponse(BaseModel):
     enabled: bool
     folder_path: Optional[str] = None
     learning: bool = False
+    is_auto_description: bool = False
     updated_at: datetime
 
 
@@ -146,6 +147,22 @@ class OnboardingStatusResponse(BaseModel):
     seeded_at: datetime | None = None
     completed_at: datetime | None = None
     should_seed_defaults: bool
+
+
+class LockSettingStatus(BaseModel):
+    """App settings row status for one lock key."""
+
+    key: str
+    updated_at: datetime | None = None
+
+
+class LockSettingsResponse(BaseModel):
+    """Response for GET/PUT /api/settings/locks."""
+
+    lock_file: list[str] = Field(default_factory=list)
+    lock_folder: list[str] = Field(default_factory=list)
+    lock_file_status: LockSettingStatus
+    lock_folder_status: LockSettingStatus
 
 
 # ── Search ───────────────────────────────────────────────────────────────

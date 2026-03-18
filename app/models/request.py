@@ -84,6 +84,10 @@ class CategoryCreate(BaseModel):
         pattern=r"^#[0-9a-fA-F]{6}$",
         description="Hex color code, e.g. #6366f1. Defaults to #6366f1 if not provided.",
     )
+    is_auto_description: bool = Field(
+        default=False,
+        description="True when the description was auto-generated (e.g. from folder path). Cleared when user manually edits description.",
+    )
 
 
 class CategoryUpdate(BaseModel):
@@ -189,6 +193,19 @@ class WatcherFolderUpdate(BaseModel):
         if not self.model_fields_set:
             raise ValueError("At least one field must be provided.")
         return self
+
+
+class LockSettingsUpdateRequest(BaseModel):
+    """PUT /api/settings/locks request body."""
+
+    lock_file: list[str] = Field(
+        default_factory=list,
+        description="Absolute file paths that must not be sent to AI features.",
+    )
+    lock_folder: list[str] = Field(
+        default_factory=list,
+        description="Absolute folder paths whose children must not be sent to AI features.",
+    )
 
 
 # ── Search ───────────────────────────────────────────────────────────────
