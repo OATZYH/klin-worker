@@ -49,7 +49,6 @@ from app.services.observability import (
 )
 from app.services.system_log_service import SystemLogService
 from app.services.voyager_service import mount_voyager
-from langfuse import observe, get_client
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
@@ -60,7 +59,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Shared service instances ─────────────────────────────────────────────
-langfuse = get_client()
+
 _rag_service = RagService()
 _system_log_service = SystemLogService()
 _text_cache = TextCache()
@@ -131,7 +130,6 @@ async def _cleanup_system_logs() -> int:
 # ── Lifespan ─────────────────────────────────────────────────────────────
 
 @asynccontextmanager
-@observe
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown lifecycle hook."""
     global _startup_checks

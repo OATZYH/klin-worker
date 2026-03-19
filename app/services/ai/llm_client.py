@@ -10,21 +10,21 @@ The singleton lifecycle is managed by FastAPI's lifespan in ``app/main.py``:
 """
 
 import asyncio
-from contextlib import nullcontext
 import json
 import logging
 import queue
 import threading
+from time import perf_counter
 from typing import Any, AsyncIterator, Iterator
-from langfuse import get_client, observe, propagate_attributes
 
 import httpx
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.services.observability import safe_start_observation, safe_update_observation
 
 logger = logging.getLogger(__name__)
-langfuse = get_client()
+
 
 class LlmClient:
     """
@@ -43,56 +43,47 @@ class LlmClient:
         self._model_id: str = ""
 
     # ── Lifecycle ────────────────────────────────────────────────────────
-    @observe
+
     async def startup(self) -> None:
         """
         Create the httpx client and optionally check server reachability.
 
         Call once at app startup (lifespan event).
         """
-        with propagate_attributes(session_id="chat-session-123"):
-            span_ctx = (
-                langfuse.start_as_current_observation(as_type="span", name="llm.startup")
-                if langfuse
-                else nullcontext()
+        if self._client is not None:
+            return
+
+        self._client = httpx.AsyncClient(
+            base_url=settings.llama_server_url,
+            timeout=300.0,
+        )
+
+        try:
+            await self.ensure_general_available()
+            logger.info("llama-server reachable  →  model: %s", self._model_id)
+
+            try:
+                await self.ensure_embedding_available(require_general_check=False)
+                logger.info("Embeddings support: true")
+            except AiCapabilityUnavailableError as exc:
+                logger.warning("Embeddings support: false (%s)", exc.detail)
+        except Exception as exc:
+            logger.warning(
+                "llama-server not reachable at %s — AI features will fail "
+                "until the server is available. (%s)",
+                settings.llama_server_url,
+                exc,
             )
-            with span_ctx:
-                if self._client is not None:
-                    return
 
-                self._client = httpx.AsyncClient(
-                    base_url=settings.llama_server_url,
-                    timeout=300.0,
-                )
-
-                try:
-                    await self.ensure_general_available()
-                    logger.info("llama-server reachable  →  model: %s", self._model_id)
-
-                    try:
-                        await self.ensure_embedding_available(require_general_check=False)
-                        logger.info("Embeddings support: true")
-                    except AiCapabilityUnavailableError as exc:
-                        logger.warning("Embeddings support: false (%s)", exc.detail)
-                except Exception as exc:
-                    logger.warning(
-                        "llama-server not reachable at %s — AI features will fail "
-                        "until the server is available. (%s)",
-                        settings.llama_server_url,
-                        exc,
-                    )
-
-    @observe
     async def shutdown(self) -> None:
         """Close the httpx client.  Call at app shutdown."""
-        with propagate_attributes(session_id="chat-session-123"):
-            if self._client is not None:
-                await self._client.aclose()
-                self._client = None
-                self._server_reachable = False
-                self._embeddings_supported = False
-                self._model_id = ""
-                logger.info("llama-server HTTP client closed.")
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+            self._server_reachable = False
+            self._embeddings_supported = False
+            self._model_id = ""
+            logger.info("llama-server HTTP client closed.")
 
     @property
     def is_ready(self) -> bool:
@@ -104,73 +95,68 @@ class LlmClient:
     def is_loaded(self) -> bool:
         return self.is_ready
 
-    @observe
     async def ensure_general_available(self) -> None:
         """Validate that the llama-server can handle general chat requests."""
-        with propagate_attributes(session_id="chat-session-123"):
-            self._assert_client_started("general")
+        self._assert_client_started("general")
 
-            try:
-                resp = await self._client.get("/models", timeout=10.0)  # type: ignore[union-attr]
-                resp.raise_for_status()
-                data = resp.json()
-                models = data.get("data", [])
-                self._server_reachable = True
+        try:
+            resp = await self._client.get("/models", timeout=10.0)  # type: ignore[union-attr]
+            resp.raise_for_status()
+            data = resp.json()
+            models = data.get("data", [])
+            self._server_reachable = True
 
-                if not models:
-                    self._model_id = ""
-                    self._vision_supported = False
-                    self._embeddings_supported = False
-                    raise AiCapabilityUnavailableError(
-                        "general",
-                        "General AI is unavailable because llama-server has no loaded model.",
-                    )
-
-                self._model_id = models[0].get("id", "unknown")
-                _vision_keywords = ("vl", "vision", "multimodal", "mm")
-                name_lower = self._model_id.lower()
-                self._vision_supported = any(kw in name_lower for kw in _vision_keywords)
-            except AiCapabilityUnavailableError:
-                raise
-            except Exception as exc:
-                self._mark_general_unavailable()
+            if not models:
+                self._model_id = ""
+                self._vision_supported = False
+                self._embeddings_supported = False
                 raise AiCapabilityUnavailableError(
                     "general",
-                    "General AI is unavailable because llama-server cannot be reached.",
-                ) from exc
+                    "General AI is unavailable because llama-server has no loaded model.",
+                )
 
-    @observe
+            self._model_id = models[0].get("id", "unknown")
+            _vision_keywords = ("vl", "vision", "multimodal", "mm")
+            name_lower = self._model_id.lower()
+            self._vision_supported = any(kw in name_lower for kw in _vision_keywords)
+        except AiCapabilityUnavailableError:
+            raise
+        except Exception as exc:
+            self._mark_general_unavailable()
+            raise AiCapabilityUnavailableError(
+                "general",
+                "General AI is unavailable because llama-server cannot be reached.",
+            ) from exc
+
     async def ensure_embedding_available(
         self,
         *,
         require_general_check: bool = True,
     ) -> None:
         """Validate that the llama-server can handle embedding requests."""
-        with propagate_attributes(session_id="chat-session-123"):
-            self._assert_client_started("embedding")
+        self._assert_client_started("embedding")
 
-            if require_general_check:
-                await self.ensure_general_available()
+        if require_general_check:
+            await self.ensure_general_available()
 
-            try:
-                resp = await self._client.post(  # type: ignore[union-attr]
-                    "/embeddings",
-                    json={"input": ["health-check"]},
-                    timeout=15.0,
-                )
-                resp.raise_for_status()
-                self._server_reachable = True
-                self._embeddings_supported = True
-            except Exception as exc:
-                self._embeddings_supported = False
-                raise AiCapabilityUnavailableError(
-                    "embedding",
-                    "Embedding AI is unavailable because the embeddings endpoint is not responding.",
-                ) from exc
+        try:
+            resp = await self._client.post(  # type: ignore[union-attr]
+                "/embeddings",
+                json={"input": ["health-check"]},
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            self._server_reachable = True
+            self._embeddings_supported = True
+        except Exception as exc:
+            self._embeddings_supported = False
+            raise AiCapabilityUnavailableError(
+                "embedding",
+                "Embedding AI is unavailable because the embeddings endpoint is not responding.",
+            ) from exc
 
     # ── Chat completions ─────────────────────────────────────────────────
 
-    @observe
     async def achat(
         self,
         messages: list[dict[str, str]],
@@ -183,34 +169,54 @@ class LlmClient:
 
         Returns the assistant message content as a plain string.
         """
-        with propagate_attributes(session_id="chat-session-123"):
-            span_ctx = (
-                langfuse.start_as_current_observation(as_type="span", name="llm.chat.request")
-                if langfuse
-                else nullcontext()
-            )
-            with span_ctx:
-                self._assert_client_started("general")
+        self._assert_client_started("general")
 
-                body: dict[str, Any] = {
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens or settings.max_token_size,
-                }
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+        }
 
-                try:
-                    resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
-                    resp.raise_for_status()
-                    data = resp.json()
-                    self._server_reachable = True
-                    content = data["choices"][0]["message"]["content"].strip()
-                    return content
-                except Exception as exc:
-                    self._mark_general_unavailable()
-                    raise AiCapabilityUnavailableError(
-                        "general",
-                        "General AI is unavailable because llama-server cannot complete chat requests.",
-                    ) from exc
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.chat.completion",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": body["max_tokens"],
+            },
+            metadata={"capability": "general", "stream": False},
+        ) as observation:
+            try:
+                resp = await self._client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                data = resp.json()
+                self._server_reachable = True
+
+                content = data["choices"][0]["message"]["content"].strip()
+                safe_update_observation(
+                    observation,
+                    output=content,
+                    usage_details=data.get("usage"),
+                    metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
+                )
+                return content
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                self._mark_general_unavailable()
+                raise AiCapabilityUnavailableError(
+                    "general",
+                    "General AI is unavailable because llama-server cannot complete chat requests.",
+                ) from exc
 
     def chat_stream(
         self,
@@ -249,7 +255,6 @@ class LlmClient:
                 raise item
             yield item
 
-    @observe
     async def achat_stream(
         self,
         messages: list[dict[str, str]],
@@ -258,16 +263,31 @@ class LlmClient:
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream chat completion tokens from llama-server."""
-        with propagate_attributes(session_id="chat-session-123"):
-            self._assert_client_started("general")
+        self._assert_client_started("general")
 
-            body: dict[str, Any] = {
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+            "stream": True,
+        }
+
+        started_at = perf_counter()
+        collected_tokens: list[str] = []
+        usage_details: dict[str, Any] | None = None
+
+        with safe_start_observation(
+            name="llm.chat.stream",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.max_token_size,
+                "max_tokens": body["max_tokens"],
                 "stream": True,
-            }
-
+            },
+            metadata={"capability": "general", "stream": True},
+        ) as observation:
             try:
                 async with self._client.stream(  # type: ignore[union-attr]
                     "POST",
@@ -294,6 +314,10 @@ class LlmClient:
                         except json.JSONDecodeError:
                             continue
 
+                        usage = data.get("usage")
+                        if isinstance(usage, dict):
+                            usage_details = usage
+
                         choices = data.get("choices", [])
                         if not choices:
                             continue
@@ -307,8 +331,27 @@ class LlmClient:
                             content = message.get("content")
 
                         if isinstance(content, str) and content:
+                            collected_tokens.append(content)
                             yield content
+
+                safe_update_observation(
+                    observation,
+                    output="".join(collected_tokens),
+                    usage_details=usage_details,
+                    metadata={
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                        "token_chunks": len(collected_tokens),
+                    },
+                )
             except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
                 self._mark_general_unavailable()
                 raise AiCapabilityUnavailableError(
                     "general",
@@ -317,7 +360,6 @@ class LlmClient:
 
     # ── Vision / multimodal ─────────────────────────────────────────────
 
-    @observe
     async def achat_with_vision(
         self,
         messages: list[dict[str, Any]],
@@ -332,16 +374,27 @@ class LlmClient:
         forwarded as-is.  Otherwise images are stripped and the request is
         retried as text-only.
         """
-        with propagate_attributes(session_id="chat-session-123"):
-            self._assert_client_started("general")
+        self._assert_client_started("general")
 
-            if not self._vision_supported:
-                return await self.achat(
-                    self._strip_images(messages),
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+        if not self._vision_supported:
+            return await self.achat(
+                self._strip_images(messages),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
 
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.chat.vision",
+            as_type="generation",
+            model=self._model_id or "unknown",
+            input_payload={
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens or settings.max_token_size,
+            },
+            metadata={"capability": "vision"},
+        ) as observation:
             try:
                 body: dict[str, Any] = {
                     "messages": messages,
@@ -353,10 +406,24 @@ class LlmClient:
                 data = resp.json()
                 self._server_reachable = True
                 content = data["choices"][0]["message"]["content"].strip()
+                safe_update_observation(
+                    observation,
+                    output=content,
+                    usage_details=data.get("usage"),
+                    metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
+                )
                 return content
             except AiCapabilityUnavailableError:
                 raise
             except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "fallback",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
                 logger.warning(
                     "Vision chat failed — falling back to text-only. (%s)", exc
                 )
@@ -401,7 +468,6 @@ class LlmClient:
 
     # ── Embeddings ───────────────────────────────────────────────────────
 
-    @observe
     async def aembed(self, texts: list[str]) -> list[list[float]]:
         """
         Generate embeddings via the llama-server ``/embeddings`` endpoint.
@@ -412,47 +478,69 @@ class LlmClient:
         item (shape [n_tokens, n_embd]).  We detect this and mean-pool the
         token vectors into a single document vector.
         """
-        with propagate_attributes(session_id="chat-session-123"):
-            span_ctx = (
-                langfuse.start_as_current_observation(as_type="span", name="llm.embedding.request")
-                if langfuse
-                else nullcontext()
+        self._assert_client_started("embedding")
+
+        body: dict[str, Any] = {"input": texts}
+
+        started_at = perf_counter()
+        with safe_start_observation(
+            name="llm.embedding.create",
+            as_type="embedding",
+            model=self._model_id or "unknown",
+            input_payload={"input": texts},
+            metadata={"capability": "embedding", "input_count": len(texts)},
+        ) as observation:
+            try:
+                resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                resp_json = resp.json()
+                # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
+                data = resp_json if isinstance(resp_json, list) else resp_json["data"]
+                self._server_reachable = True
+                self._embeddings_supported = True
+            except Exception as exc:
+                safe_update_observation(
+                    observation,
+                    metadata={
+                        "status": "error",
+                        "error": str(exc),
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 2),
+                    },
+                )
+                self._embeddings_supported = False
+                raise AiCapabilityUnavailableError(
+                    "embedding",
+                    "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
+                ) from exc
+
+            pooled: list[list[float]] = []
+            for item in data:
+                emb = item["embedding"]
+                if emb and isinstance(emb[0], list):
+                    n_tokens = len(emb)
+                    dim = len(emb[0])
+                    avg = [
+                        sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                        for d in range(dim)
+                    ]
+                    pooled.append(avg)
+                else:
+                    pooled.append(emb)
+
+            usage_details = None
+            if isinstance(resp_json, dict):
+                usage = resp_json.get("usage")
+                if isinstance(usage, dict):
+                    usage_details = usage
+
+            dimension = len(pooled[0]) if pooled else 0
+            safe_update_observation(
+                observation,
+                output={"embedding_count": len(pooled), "embedding_dimension": dimension},
+                usage_details=usage_details,
+                metadata={"duration_ms": round((perf_counter() - started_at) * 1000, 2)},
             )
-            with span_ctx:
-                self._assert_client_started("embedding")
-
-                body: dict[str, Any] = {"input": texts}
-
-                try:
-                    resp = await self._client.post("/embeddings", json=body)  # type: ignore[union-attr]
-                    resp.raise_for_status()
-                    resp_json = resp.json()
-                    # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
-                    data = resp_json if isinstance(resp_json, list) else resp_json["data"]
-                    self._server_reachable = True
-                    self._embeddings_supported = True
-                except Exception as exc:
-                    self._embeddings_supported = False
-                    raise AiCapabilityUnavailableError(
-                        "embedding",
-                        "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
-                    ) from exc
-
-                pooled: list[list[float]] = []
-                for item in data:
-                    emb = item["embedding"]
-                    if emb and isinstance(emb[0], list):
-                        n_tokens = len(emb)
-                        dim = len(emb[0])
-                        avg = [
-                            sum(emb[t][d] for t in range(n_tokens)) / n_tokens
-                            for d in range(dim)
-                        ]
-                        pooled.append(avg)
-                    else:
-                        pooled.append(emb)
-
-                return pooled
+            return pooled
 
     # ── Internals ────────────────────────────────────────────────────────
 
