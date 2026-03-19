@@ -1,0 +1,162 @@
+name: Release Sidecar
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: Quality Gate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Check version consistency
+        run: uv run python scripts/check_version_sync.py
+
+      - name: Ruff (syntax and undefined-name checks)
+        run: uv run ruff check app tests scripts main.py --select E9,F63,F7,F82
+
+      - name: Ruff format check (tests and scripts)
+        run: uv run ruff format --check tests scripts
+
+      - name: Run non-LLM tests
+        run: uv run pytest -q -m "not llm"
+
+  validate:
+    name: Validate Release Tag
+    runs-on: ubuntu-latest
+    needs: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Validate semantic tag and version sync
+        run: uv run python scripts/validate_release_tag.py
+
+  build:
+    name: Build ${{ matrix.target_triple }}
+    runs-on: ${{ matrix.os }}
+    needs: validate
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target_triple: aarch64-apple-darwin
+            binary_ext: ""
+          - os: macos-13
+            target_triple: x86_64-apple-darwin
+            binary_ext: ""
+          - os: windows-latest
+            target_triple: x86_64-pc-windows-msvc
+            binary_ext: ".exe"
+          - os: ubuntu-latest
+            target_triple: x86_64-unknown-linux-gnu
+            binary_ext: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install build dependencies
+        run: uv sync --extra build
+
+      - name: Build sidecar
+        shell: pwsh
+        run: ./build-sidecar.ps1 -PythonVersion 3.13 -TargetTriple ${{ matrix.target_triple }} -SkipTauriCopy
+
+      - name: Prepare release assets
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $distBinary = if ("${{ runner.os }}" -eq "Windows") { "dist/klin-worker.exe" } else { "dist/klin-worker" }
+          $assetName = "klin-worker-$version-${{ matrix.target_triple }}${{ matrix.binary_ext }}"
+
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item -Path $distBinary -Destination "release/$assetName" -Force
+
+          $hash = (Get-FileHash -Algorithm SHA256 "release/$assetName").Hash.ToLower()
+          "$hash  $assetName" | Set-Content -NoNewline "release/$assetName.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidecar-${{ matrix.target_triple }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+
+      - name: Aggregate checksums
+        shell: bash
+        run: |
+          find release -name '*.sha256' -type f | sort | xargs cat > release/SHA256SUMS.txt
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/**/klin-worker-*
+            release/SHA256SUMS.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false

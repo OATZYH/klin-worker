@@ -30,6 +30,10 @@ dependencies = [
 klin-worker = "main:main"
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "ruff>=0.11.0",
+]
 build = [
     "pyinstaller>=6.0.0",
 ]
@@ -37,4 +41,14 @@ build = [
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["alembic*", "models*", "docs*", "klin-bruno-api*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "llm: tests requiring live llama-server dependencies",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
 

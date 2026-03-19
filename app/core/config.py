@@ -11,7 +11,9 @@ Storage path resolution:
 """
 
 import logging
+import os
 import sys
+import tomllib
 from pathlib import Path
 from typing import Optional
 
@@ -47,12 +49,50 @@ def _resolve_default_storage_dir() -> Path:
 _KLIN_DIR = _resolve_default_storage_dir()
 
 
+def _resolve_app_version() -> str:
+    """Resolve app version from env/version file/pyproject in that order."""
+    env_version = os.environ.get("KLIN_APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+
+    candidate_files: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate_files.append(Path(meipass) / "VERSION")
+        candidate_files.append(Path(sys.executable).resolve().parent / "VERSION")
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    candidate_files.append(project_root / "VERSION")
+
+    for version_file in candidate_files:
+        try:
+            if version_file.exists():
+                value = version_file.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+        except OSError:
+            continue
+
+    pyproject_path = project_root / "pyproject.toml"
+    try:
+        if pyproject_path.exists():
+            parsed = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+            version = str(parsed.get("project", {}).get("version", "")).strip()
+            if version:
+                return version
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+    return "0.0.0"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
 
     # ── App ──────────────────────────────────────────────────────────────
     app_name: str = "klin-worker"
-    app_version: str = "0.2.0"
+    app_version: str = _resolve_app_version()
     debug: bool = False
 
     # ── Server ───────────────────────────────────────────────────────────
@@ -104,6 +144,7 @@ class Settings(BaseSettings):
 
     # ── llama-server (out-of-process, managed by Tauri) ────────────────
     llama_server_url: str = "http://127.0.0.1:8080/"
+    llama_embedding_server_url: str = "http://127.0.0.1:8081/"
     embedding_dim_size: int = 2048        # must match model served by llama-server
     max_token_limit: int = 4096           # used for RAG chunking
 

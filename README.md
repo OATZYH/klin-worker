@@ -112,13 +112,46 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KLIN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080/v1` | OpenAI-compatible `llama-server` base URL |
+| `KLIN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080/` | OpenAI-compatible `llama-server` base URL |
+| `KLIN_LLAMA_EMBEDDING_SERVER_URL` | `http://127.0.0.1:8081/` | OpenAI-compatible embedding `llama-server` base URL |
 | `KLIN_EMBEDDING_DIM_SIZE` | `2048` | Embedding vector dimension expected from the served model |
 | `KLIN_MAX_TOKEN_LIMIT` | `4096` | Max token budget used by worker generation / chunking |
 | `KLIN_DEBUG` | `false` | Enable debug logging |
 | `KLIN_RAG_WORKING_DIR` | `.storage/rag_storage` in source-run dev | RAG-Anything storage path |
 | `KLIN_DATABASE_PATH` | `.storage/klin.db` in source-run dev | SQLite database path |
 | `KLIN_SIMILARITY_THRESHOLD` | `0.85` | Duplicate detection threshold |
+
+---
+
+## CI and Releases
+
+This repository uses GitHub Actions for CI and version-tagged sidecar releases.
+
+- CI workflow: `.github/workflows/ci.yml`
+    - Runs on push and PR to `main`/`dev`
+    - Checks version sync (`pyproject.toml` vs `VERSION`)
+    - Runs Ruff syntax checks and non-LLM tests
+
+- Release workflow: `.github/workflows/release-sidecar.yml`
+    - Runs only when a semantic tag is pushed: `vX.Y.Z`
+    - Validates tag/version consistency before build
+    - Builds sidecar binaries for:
+        - macOS Apple Silicon (`aarch64-apple-darwin`)
+        - macOS Intel (`x86_64-apple-darwin`)
+        - Windows x64 (`x86_64-pc-windows-msvc`)
+        - Linux x64 (`x86_64-unknown-linux-gnu`)
+    - Publishes binaries and checksums as GitHub Release assets
+
+Release steps:
+
+1. Update `pyproject.toml` version and `VERSION` to the same value.
+2. Commit changes.
+3. Create and push a tag in the same version.
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
 
 ---
 

@@ -115,11 +115,13 @@ async def check_llm_server() -> CheckResult:
     except Exception as exc:
         return CheckResult(name=name, ok=False, detail=str(exc))
 
-    detail = f"Connected — {settings.llama_server_url}"
+    detail = f"Chat connected — {settings.llama_server_url}"
     try:
         await llm_client.ensure_embedding_available(require_general_check=False)
     except AiCapabilityUnavailableError:
-        detail = f"{detail} (embeddings unavailable)"
+        detail = f"{detail}; Embedding unavailable — {settings.llama_embedding_server_url}"
+    else:
+        detail = f"{detail}; Embedding connected — {settings.llama_embedding_server_url}"
 
     return CheckResult(name=name, ok=True, detail=detail)
 
