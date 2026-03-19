@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 import numpy as np
+from langfuse import observe, propagate_attributes
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -28,6 +29,7 @@ class ClassificationService:
 
     # ── Public API ───────────────────────────────────────────────────────
 
+    @observe
     async def get_file_embedding(
         self,
         file_path: str,
@@ -39,8 +41,10 @@ class ClassificationService:
         Can be called in parallel with summary generation (with summary=None)
         or after summary is available (with summary set) for richer results.
         """
-        return await self._get_file_embedding(file_path, summary=summary)
+        with propagate_attributes(session_id="chat-session-123"):
+            return await self._get_file_embedding(file_path, summary=summary)
 
+    @observe
     async def classify_with_embedding(
         self,
         file_id: str,
@@ -53,42 +57,44 @@ class ClassificationService:
         This is the second half of the classify pipeline — call after
         `get_file_embedding()` returns.
         """
-        # Load active categories with embeddings
-        is_active_column = getattr(Category, "is_active")
-        embedding_column = getattr(Category, "embedding")
-        result = await db.execute(
-            select(Category).where(
-                is_active_column.is_(True),
-                embedding_column.isnot(None),
+        with propagate_attributes(session_id="chat-session-123"):
+            # Load active categories with embeddings
+            is_active_column = getattr(Category, "is_active")
+            embedding_column = getattr(Category, "embedding")
+            result = await db.execute(
+                select(Category).where(
+                    is_active_column.is_(True),
+                    embedding_column.isnot(None),
+                )
             )
-        )
-        categories = result.scalars().all()
+            categories = result.scalars().all()
 
-        if not categories:
-            logger.info("No categories with embeddings — skipping classification")
-            return []
+            if not categories:
+                logger.info("No categories with embeddings — skipping classification")
+                return []
 
-        # Compute cosine similarity for each category
-        scores: list[dict[str, Any]] = []
-        for cat in categories:
-            cat_embedding = json.loads(cat.embedding)
-            score = self._cosine_similarity(file_embedding, cat_embedding)
-            scores.append({
-                "category_id": cat.id,
-                "name": cat.name,
-                "destination_path": cat.destination_path,
-                "score": round(float(score), 4),
-            })
+            # Compute cosine similarity for each category
+            scores: list[dict[str, Any]] = []
+            for cat in categories:
+                cat_embedding = json.loads(cat.embedding)
+                score = self._cosine_similarity(file_embedding, cat_embedding)
+                scores.append({
+                    "category_id": cat.id,
+                    "name": cat.name,
+                    "destination_path": cat.destination_path,
+                    "score": round(float(score), 4),
+                })
 
-        # Sort descending and trim
-        scores.sort(key=lambda s: s["score"], reverse=True)
-        scores = scores[: settings.classification_top_k]
+            # Sort descending and trim
+            scores.sort(key=lambda s: s["score"], reverse=True)
+            scores = scores[: settings.classification_top_k]
 
-        # Persist scores to DB
-        await self._save_scores(file_id, scores, db)
+            # Persist scores to DB
+            await self._save_scores(file_id, scores, db)
 
-        return scores
+            return scores
 
+    @observe
     async def classify(
         self,
         file_id: str,
@@ -108,17 +114,19 @@ class ClassificationService:
 
         Returns a sorted list of {"category_id", "name", "score"} dicts.
         """
-        # 1. Get file embedding
-        file_embedding = await self._get_file_embedding(file_path, summary=summary)
-        if file_embedding is None:
-            logger.warning("No embedding for %s — skipping classification", file_path)
-            return []
+        with propagate_attributes(session_id="chat-session-123"):
+            # 1. Get file embedding
+            file_embedding = await self._get_file_embedding(file_path, summary=summary)
+            if file_embedding is None:
+                logger.warning("No embedding for %s — skipping classification", file_path)
+                return []
 
-        # 2-5. Score + persist
-        return await self.classify_with_embedding(file_id, file_embedding, db)
+            # 2-5. Score + persist
+            return await self.classify_with_embedding(file_id, file_embedding, db)
 
     # ── Embedding helpers ────────────────────────────────────────────────
 
+    @observe
     async def generate_category_embedding(
         self,
         text: str,
@@ -128,18 +136,20 @@ class ClassificationService:
 
         Delegates to the RAG service's underlying embedding function.
         """
-        await self._rag.ensure_embedding_available()
+        with propagate_attributes(session_id="chat-session-123"):
+            await self._rag.ensure_embedding_available()
 
-        try:
-            vectors = await self._rag.embed_texts([text])
-            if vectors is not None and len(vectors) > 0:
-                return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
-        except AiCapabilityUnavailableError:
-            raise
-        except Exception as exc:
-            logger.error("Category embedding failed: %s", exc)
-        return None
+            try:
+                vectors = await self._rag.embed_texts([text])
+                if vectors is not None and len(vectors) > 0:
+                    return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
+            except AiCapabilityUnavailableError:
+                raise
+            except Exception as exc:
+                logger.error("Category embedding failed: %s", exc)
+            return None
 
+    @observe
     async def _get_file_embedding(
         self,
         file_path: str,
@@ -152,26 +162,27 @@ class ClassificationService:
         ``"<filename> <extension>. <summary>"`` which captures the actual
         content semantics rather than just the filename.
         """
-        await self._rag.ensure_embedding_available()
+        with propagate_attributes(session_id="chat-session-123"):
+            await self._rag.ensure_embedding_available()
 
-        try:
-            from pathlib import Path
+            try:
+                from pathlib import Path
 
-            p = Path(file_path)
-            if summary:
-                query_text = f"{p.stem} {p.suffix}. {summary}"
-            else:
-                # Fallback: filename only (lightweight proxy)
-                query_text = f"{p.stem} {p.suffix}"
+                p = Path(file_path)
+                if summary:
+                    query_text = f"{p.stem} {p.suffix}. {summary}"
+                else:
+                    # Fallback: filename only (lightweight proxy)
+                    query_text = f"{p.stem} {p.suffix}"
 
-            vectors = await self._rag.embed_texts([query_text])
-            if vectors is not None and len(vectors) > 0:
-                return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
-        except AiCapabilityUnavailableError:
-            raise
-        except Exception as exc:
-            logger.error("File embedding failed for %s: %s", file_path, exc)
-        return None
+                vectors = await self._rag.embed_texts([query_text])
+                if vectors is not None and len(vectors) > 0:
+                    return vectors[0].tolist() if hasattr(vectors[0], "tolist") else list(vectors[0])
+            except AiCapabilityUnavailableError:
+                raise
+            except Exception as exc:
+                logger.error("File embedding failed for %s: %s", file_path, exc)
+            return None
 
     # ── Math ─────────────────────────────────────────────────────────────
 
