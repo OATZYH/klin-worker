@@ -85,6 +85,7 @@ class Category(SQLModel, table=True):
     name: str = Field(nullable=False, unique=True)
     description: str = Field(default="", nullable=False)
     color: str = Field(default="#6366f1", max_length=7, nullable=False)
+    icon: Optional[str] = Field(default=None, max_length=64)
     destination_path: Optional[str] = Field(default=None)
     is_path_manual: bool = Field(default=False, nullable=False)  # True when user set path manually
     embedding: Optional[str] = Field(default=None)  # JSON-serialised float list

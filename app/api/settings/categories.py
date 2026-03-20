@@ -57,6 +57,7 @@ def _to_response(cat: Category, learning: bool = False) -> CategoryResponse:
         name=cat.name,
         description=cat.description,
         color=cat.color,
+        icon=cat.icon,
         enabled=cat.is_active,
         folder_path=cat.destination_path,
         learning=learning,
@@ -124,6 +125,7 @@ async def create_category(
         is_active=body.enabled,
         destination_path=body.folder_path,
         color=body.color or "#6366f1",
+        icon=body.icon,
         is_auto_description=body.is_auto_description,
     )
     try:
@@ -231,6 +233,7 @@ async def batch_create_categories(
             is_active=item.enabled,
             destination_path=item.folder_path,
             color=item.color or "#6366f1",
+            icon=item.icon,
             is_auto_description=item.is_auto_description,
         )
         # Skip embedding for folder-imported categories (is_auto_description=True).

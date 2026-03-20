@@ -41,6 +41,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "photo, picture, image, screenshot, wallpaper, album, selfie, video, clip, recording, media file, camera photo, gallery, รูปภาพ, ภาพถ่าย, สกรีนช็อต, วิดีโอ, อัลบั้ม, กล้อง, .jpg, .jpeg, .png, .heic, .gif, .mp4, .mov, .avi, .mkv",
         ),
         "color": "#06b6d4",  # cyan
+        "icon": "Image",
     },
     {
         "name": "Creative Projects",
@@ -49,6 +50,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "creative writing, stories, poems, scripts, screenplays, design briefs, moodboards, portfolios, illustrations, video projects, music composition, branding, content creation, งานสร้างสรรค์, งานศิลปะ, นิยาย, บทกวี, บทภาพยนตร์, โปรเจคออกแบบ, พอร์ตโฟลิโอ, ภาพประกอบ, ดนตรี, .psd, .ai, .blend, .fig, .sketch",
         ),
         "color": "#ec4899",  # pink
+        "icon": "Palette",
     },
     {
         "name": "Work & Business",
@@ -57,6 +59,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "project plan, meeting notes, presentation, proposal, company profile, business strategy, roadmap, sprint planning, OKR, KPI, client deliverable, internal document, report, documentation, เอกสารบริษัท, แผนงาน, โน้ตประชุม, โปรเจคงาน, ข้อเสนอ, กลยุทธ์ธุรกิจ, .pptx, .xlsx, .docx, .pdf",
         ),
         "color": "#3b82f6",  # blue
+        "icon": "Briefcase",
     },
     {
         "name": "Finance & Invoices",
@@ -65,6 +68,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "invoice, receipt, billing statement, bank statement, transaction history, tax document, payment confirmation, credit card statement, expense report, ใบเสร็จ, ใบกำกับภาษี, รายการเดินบัญชี, ภาษี, รายรับรายจ่าย, .pdf, .xlsx, .csv",
         ),
         "color": "#22c55e",  # green
+        "icon": "Receipt",
     },
     {
         "name": "Legal & Contracts",
@@ -73,6 +77,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "contract, agreement, NDA, terms and conditions, legal notice, license agreement, court document, compliance document, สัญญา, ข้อตกลง, เอกสารกฎหมาย, หนังสือแจ้ง, ข้อกำหนด",
         ),
         "color": "#64748b",  # slate
+        "icon": "Scale",
     },
     {
         "name": "Education & Research",
@@ -81,6 +86,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "lecture notes, study material, textbook, syllabus, assignment, research paper, journal article, thesis draft, dataset description, โน้ตเรียน, หนังสือเรียน, รายงาน, งานวิจัย, วิทยานิพนธ์, บทความวิชาการ",
         ),
         "color": "#f59e0b",  # amber
+        "icon": "GraduationCap",
     },
     {
         "name": "Personal",
@@ -89,6 +95,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "personal letter, diary, journal, private note, family document, personal record, ID card copy, certificate, บันทึกส่วนตัว, จดหมาย, เอกสารส่วนตัว, ครอบครัว",
         ),
         "color": "#a855f7",  # purple
+        "icon": "User",
     },
     {
         "name": "Travel",
@@ -97,6 +104,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "flight ticket, boarding pass, hotel reservation, itinerary, visa document, travel insurance, ตั๋วเครื่องบิน, แผนการเดินทาง, จองโรงแรม, วีซ่า",
         ),
         "color": "#0ea5e9",  # sky
+        "icon": "Plane",
     },
     {
         "name": "Health & Medical",
@@ -105,6 +113,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "medical report, lab result, prescription, doctor appointment, treatment plan, hospital bill, ผลตรวจ, ใบสั่งยา, ใบรับรองแพทย์, โรงพยาบาล",
         ),
         "color": "#ef4444",  # red
+        "icon": "HeartPulse",
     },
     {
         "name": "General Documents",
@@ -113,6 +122,7 @@ DEFAULT_CATEGORIES: list[dict[str, Any]] = [
             "miscellaneous document, general file, uncategorized, เอกสารทั่วไป",
         ),
         "color": "#78716c",  # stone
+        "icon": "FileText",
     },
 ]
 
@@ -156,6 +166,7 @@ async def seed_default_categories(db: AsyncSession) -> int:
             name=defn["name"],
             description=defn["description"],
             color=defn["color"],
+            icon=defn.get("icon"),
             is_default=True,
         )
         db.add(cat)
