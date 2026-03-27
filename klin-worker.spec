@@ -12,6 +12,7 @@ project_root = Path(os.getcwd()).resolve()
 datas = [
     (str(project_root / "alembic"), "alembic"),
     (str(project_root / "alembic.ini"), "."),
+    (str(project_root / "VERSION"), "."),
 ]
 
 hiddenimports = [
@@ -52,7 +53,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
