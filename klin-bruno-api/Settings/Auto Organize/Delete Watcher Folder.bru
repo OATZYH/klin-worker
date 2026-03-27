@@ -1,0 +1,11 @@
+meta {
+  name: Delete Watcher Folder
+  type: http
+  seq: 6
+}
+
+delete {
+  url: {{baseUrl}}/api/settings/auto-organize/folders/{{watcherId}}
+  body: none
+  auth: none
+}

@@ -57,9 +57,11 @@ def _to_response(cat: Category, learning: bool = False) -> CategoryResponse:
         name=cat.name,
         description=cat.description,
         color=cat.color,
+        icon=cat.icon,
         enabled=cat.is_active,
         folder_path=cat.destination_path,
         learning=learning,
+        is_auto_description=cat.is_auto_description,
         updated_at=cat.updated_at,
     )
 
@@ -123,6 +125,8 @@ async def create_category(
         is_active=body.enabled,
         destination_path=body.folder_path,
         color=body.color or "#6366f1",
+        icon=body.icon,
+        is_auto_description=body.is_auto_description,
     )
     try:
         cat.embedding = await _generate_embedding(cat, classifier)
@@ -177,6 +181,8 @@ async def update_category(
         db_field = field_map.get(field, field)
         if field == "folder_path" and value is not None:
             cat.is_path_manual = True
+        if field == "description" and value is not None:
+            cat.is_auto_description = False  # User manually edited — clear auto-gen flag
         setattr(cat, db_field, value)
         if db_field in ("name", "description"):
             need_re_embed = True
@@ -212,10 +218,12 @@ async def batch_create_categories(
     classifier: ClassificationService = Depends(_get_classifier),
 ) -> Response:
     """Batch create categories. No response body."""
+    existing_rows = await db.execute(select(Category.name))
+    existing_names: set[str] = {name for name, in existing_rows.all()}
+
     created = 0
     for item in body.categories:
-        existing = await db.execute(select(Category).where(Category.name == item.name))
-        if existing.scalar_one_or_none():
+        if item.name in existing_names:
             logger.info("Batch: skipping duplicate category '%s'", item.name)
             continue
 
@@ -225,12 +233,18 @@ async def batch_create_categories(
             is_active=item.enabled,
             destination_path=item.folder_path,
             color=item.color or "#6366f1",
+            icon=item.icon,
+            is_auto_description=item.is_auto_description,
         )
-        try:
-            cat.embedding = await _generate_embedding(cat, classifier)
-        except AiCapabilityUnavailableError as exc:
-            raise to_service_unavailable_http_exception(exc) from exc
+        # Skip embedding for folder-imported categories (is_auto_description=True).
+        # generate_missing_embeddings() will fill them in when the AI model is ready.
+        if not item.is_auto_description:
+            try:
+                cat.embedding = await _generate_embedding(cat, classifier)
+            except AiCapabilityUnavailableError as exc:
+                raise to_service_unavailable_http_exception(exc) from exc
         db.add(cat)
+        existing_names.add(item.name)
         created += 1
 
     await db.flush()

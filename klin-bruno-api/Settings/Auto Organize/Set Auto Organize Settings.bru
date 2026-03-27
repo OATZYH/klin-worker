@@ -1,0 +1,21 @@
+meta {
+  name: Set Auto Organize Settings
+  type: http
+  seq: 2
+}
+
+put {
+  url: {{baseUrl}}/api/settings/auto-organize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "enabled": true
+  }
+}

@@ -18,9 +18,11 @@ class CategoryResponse(BaseModel):
     name: str
     description: str
     color: str
+    icon: str | None = None
     enabled: bool
     folder_path: Optional[str] = None
     learning: bool = False
+    is_auto_description: bool = False
     updated_at: datetime
 
 
@@ -106,6 +108,62 @@ class DefaultBasePathResponse(BaseModel):
     default_base_path: Optional[str] = None
     updated_count: int = 0
     updated_categories: list[CategoryResponse] = []
+
+
+class AutoOrganizeSettingsResponse(BaseModel):
+    """Response for auto-organize master settings."""
+
+    enabled: bool
+
+
+class WatcherFolderResponse(BaseModel):
+    """Single watched folder row."""
+
+    id: str
+    folder_path: str
+    auto_organize_enabled: bool
+    frequency_value: int
+    frequency_unit: str
+    frequency_seconds: int
+    recursive: bool
+    last_scanned_at: datetime | None = None
+    next_scan_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WatcherFoldersResponse(BaseModel):
+    """List response for watched folders."""
+
+    results: list[WatcherFolderResponse]
+
+
+class OnboardingStatusResponse(BaseModel):
+    """First-run onboarding and seeding status."""
+
+    status: str
+    onboarding_seeded: bool = False
+    started_at: datetime | None = None
+    seeded_at: datetime | None = None
+    completed_at: datetime | None = None
+    should_seed_defaults: bool
+
+
+class LockSettingStatus(BaseModel):
+    """App settings row status for one lock key."""
+
+    key: str
+    updated_at: datetime | None = None
+
+
+class LockSettingsResponse(BaseModel):
+    """Response for GET/PUT /api/settings/locks."""
+
+    lock_file: list[str] = Field(default_factory=list)
+    lock_folder: list[str] = Field(default_factory=list)
+    lock_file_status: LockSettingStatus
+    lock_folder_status: LockSettingStatus
 
 
 # ── Search ───────────────────────────────────────────────────────────────

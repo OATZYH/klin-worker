@@ -27,6 +27,12 @@ from app.api.history import router as history_router
 from app.api.organize import router as organize_router
 from app.api.search import router as search_router
 from app.api.settings import router as settings_router
+from app.api.settings.store import (
+    SETTING_KEY_ONBOARDING_SEEDED,
+    SETTING_KEY_ONBOARDING_STATUS,
+    get_setting_value,
+    parse_bool_setting,
+)
 from app.api.summary import router as summary_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
@@ -402,8 +408,26 @@ async def health() -> dict:
         "detail": f"{settings.app_name} v{settings.app_version} is running",
     }
     all_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
+
+    async with AsyncSession(engine, expire_on_commit=False) as db:
+        onboarding_status = await get_setting_value(
+            db,
+            SETTING_KEY_ONBOARDING_STATUS,
+            default="pending",
+        )
+        onboarding_seeded = parse_bool_setting(
+            await get_setting_value(
+                db,
+                SETTING_KEY_ONBOARDING_SEEDED,
+                default="false",
+            ),
+            default=False,
+        )
+
     return {
         "status": "ok" if all_ok else "degraded",
         "version": settings.app_version,
         "services": checks,
+        "onboarding_status": onboarding_status or "pending",
+        "onboarding_seeded": onboarding_seeded,
     }

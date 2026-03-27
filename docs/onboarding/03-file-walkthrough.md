@@ -1,173 +1,154 @@
-# 📁 File-by-File Walkthrough
+# File-by-File Walkthrough
 
-## 1. Entry Points
+This walkthrough helps a new engineer locate the right code quickly.
 
-### `main.py` (Project Root)
+## Entry Points
 
-```python
-# Convenience launcher — same as `uv run fastapi dev app/main.py`
-uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=True)
-```
+### `main.py` (repo root)
 
-**What it does:** Just a shortcut to start the server. You can run `uv run python main.py` or `uv run fastapi dev app/main.py` — same thing.
+CLI wrapper for running uvicorn. Supports:
 
-### `app/main.py` (FastAPI App Factory)
+- `--host`
+- `--port`
+- `--reload`
+- `--data-dir` (sets `KLIN_APP_DATA_DIR`)
 
-This is the **heart** of the application. It does:
+### `app/main.py`
 
-1. **Configures logging** based on `settings.debug`
-2. **Creates a singleton `RagService`** instance (one for the whole app)
-3. **Defines the `lifespan` function** — runs at startup/shutdown:
-   ```python
-   @asynccontextmanager
-   async def lifespan(app: FastAPI):
-       # ON STARTUP:
-       Path(settings.database_path).parent.mkdir(...)  # Ensure .storage/ exists
-       await run_migrations()                           # Create/update DB tables
-       await _rag_service.setup()                       # Initialize RAG-Anything + llama-cpp-python
-       _startup_checks = await run_all_checks(db, rag)  # ← Check DB, llama-cpp-python, RAG
-    # NOTE: Category seeding is NOT done here.
-    # Tauri calls PUT /api/settings/default-base-path after startup.
-    # If the categories table is empty, that request also seeds defaults.
-       yield                                            # ← App runs here
-       # ON SHUTDOWN: (cleanup would go here)
-   ```
-4. **Creates the FastAPI app** with CORS middleware (allows Tauri frontend to connect)
-5. **Registers routers**: organize, settings (categories + base path), history
-6. **Health check endpoint** at `/health` — returns service status for each checked system:
-   ```json
-   {
-     "status": "ok",
-     "version": "0.2.0",
-     "services": {
-       "Database (SQLite)": { "ok": true, "detail": ".storage/klin.db — connected, has data" },
-       "llama-cpp-python":    { "ok": true, "detail": "Model loaded — models/Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf" },
-       "RAG-Anything":       { "ok": true, "detail": "Ready — storage: .storage/rag_storage" }
-     },
-     "rag_ready": true
-   }
-   ```
+Application assembly:
 
-   **Vision support:** If the loaded GGUF is a vision-capable model (e.g. Qwen2.5-VL, Qwen3VL), RAG-Anything's Visual Content Analyzer will use it to caption images and analyse tables embedded in documents (PDF, DOCX, etc.). `LlmClient` probes vision support lazily on the first call — text-only models fall back silently without breaking ingestion.
+1. Creates singleton service instances (`RagService`, `TextCache`, parser, ingest worker).
+2. Defines lifespan startup/shutdown.
+3. Mounts routers.
+4. Exposes `/health`.
 
-**Key concept — Lifespan:** FastAPI's lifespan is like `__init__` and `__del__` for the whole app. Everything before `yield` runs at startup, everything after runs at shutdown.
+When debugging startup failures, start here first.
 
----
-
-## 2. Core Configuration
+## Core Configuration
 
 ### `app/core/config.py`
 
-A single `Settings` class using `pydantic-settings`. All environment variables are prefixed with `KLIN_`.
+Single settings source via `pydantic-settings` and `KLIN_` prefix.
 
-**Key settings & what they control:**
+Most important fields for local development:
 
-| Setting | Default | Used By |
-|---|---|---|
-| `database_path` | `.storage/klin.db` | SQLite location |
-| `rag_working_dir` | `.storage/rag_storage` | RAG-Anything data |
-| `llamacpp_model_path` | `models/gemma-3-1b-it-Q4_K_M.gguf` | Path to GGUF model (swap for vision-capable GGUF to enable image analysis) |
-| `llamacpp_n_ctx` | `2048` | Context window size |
-| `llamacpp_n_gpu_layers` | `0` | GPU offload (-1 = all) |
-| `llamacpp_embedding_dim` | `2048` | Vector size (must match model!) |
-| `similarity_threshold` | `0.85` | Duplicate detection cutoff |
-| `blocked_directories` | `/System`, `/Library`, etc. | Security — can't scan system dirs |
+- `database_path`
+- `rag_working_dir`
+- `llama_server_url`
+- `embedding_dim_size`
+- `summary_max_tokens`
+- `rename_max_tokens`
+- `classification_top_k`
 
-**Smart storage path resolution:**
-```python
-def _resolve_default_storage_dir() -> Path:
-    if getattr(sys, "frozen", False):  # PyInstaller bundle (production)
-        return Path(os.environ.get("KLIN_APP_DATA_DIR")) or Path(sys.executable).parent / "data"
-    return Path(__file__).resolve().parent.parent.parent / ".storage"  # Dev mode
-```
+Storage path behavior differs between source run and frozen bundle. Read this file before changing environment assumptions.
 
-This means:
-- **Dev mode** → `.storage/` in project root
-- **Production (Tauri sidecar)** → Tauri sets `KLIN_APP_DATA_DIR` to the system app data folder
+## Data Layer
 
-**Singleton pattern:** `settings = Settings()` at the bottom — import this everywhere.
+### `app/db/models.py`
 
----
+Defines current tables:
 
-## 3. Database Layer
+1. `app_settings`
+2. `watched_folders`
+3. `categories`
+4. `files`
+5. `file_analysis`
+6. `category_scores`
+7. `history_logs`
+8. `system_logs`
 
-### `app/db/models.py` — ORM Models (5 Tables)
+### `app/db/session.py`
 
-Uses **SQLModel** (combines Pydantic validation + SQLAlchemy ORM):
+- async engine
+- `get_db` dependency with commit/rollback behavior
 
-| Table | Purpose | Key Columns |
-|---|---|---|
-| `categories` | Classification buckets (default + user-created) | `name`, `description`, `color`, `embedding` (JSON string), `is_default` |
-| `files` | Scanned file metadata | `original_path`, `hash` (SHA-256), `size`, `extension` |
-| `file_analysis` | AI-generated analysis per file | `file_id` (FK), `summary`, `suggested_name` |
-| `category_scores` | AI classification score per file×category | `file_id` (FK), `category_id` (FK), `score` (float 0-1) |
-| `history_logs` | Audit trail of every action | `file_id` (FK), `action`, `metadata_json` |
+### `app/db/migrations.py` and `alembic/versions/*`
 
-**Relationships:** `File` → has one `FileAnalysis`, many `CategoryScores`, many `HistoryLogs`.
+Schema migration entrypoint and versions.
 
-**Note:** `Category.embedding` stores the embedding vector as a **JSON-serialized string** (e.g. `"[0.23, -0.15, ...]"` ). The vector is generated from `name + description`, and `description` may already contain keyword-style phrases for broader semantic coverage. `is_default=True` marks system-seeded categories.
+## API Layer
 
-### `app/db/session.py` — Async Engine & Dependency
+### `app/api/organize.py`
 
-```python
-engine = create_async_engine(settings.database_url, ...)  # Singleton engine
+Primary business workflow.
 
-async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    async with AsyncSession(engine) as session:
-        yield session          # Route handler uses the session
-        await session.commit() # Auto-commit on success
-        # Auto-rollback on exception
-```
+- `POST /api/organize`
+- `POST /api/organize/apply`
 
-**Key concept — Dependency Injection:** FastAPI routes declare `db: AsyncSession = Depends(get_db)` and automatically get a database session. The session is committed when the request finishes, or rolled back if there's an error.
+Includes cache branches, AI checks, ingest enqueue, analysis persistence, classification, and history writes.
 
-### `app/db/migrations.py` — Alembic at Startup
+### `app/api/summary.py`
 
-```python
-async def run_migrations() -> None:
-    cfg = _get_alembic_config()
-    command.upgrade(cfg, "head")  # Apply all pending migrations
-```
+Summary endpoints:
 
-Called during `lifespan` startup — automatically brings the DB schema up to date.
+- `POST /api/summary`
+- `POST /api/summary/stream`
 
-### `alembic/versions/6e4d8a525088_initial_schema.py`
+### `app/api/settings/*`
 
-The first (and currently only) migration. Creates all 5 tables. Generated by Alembic's autogenerate feature based on the SQLModel classes.
+Settings domain:
 
----
+- categories CRUD + batch
+- default base path + onboarding status
+- auto organize settings + watched folders
 
-## 4. Request & Response Models
+### `app/api/history.py`
 
-### `app/models/request.py`
+History list/read and note history creation.
 
-```python
-class OrganizeRequest(BaseModel):
-    filepaths: list[str]  # Absolute paths like ["/Users/you/Downloads/doc.pdf"]
+### `app/api/search.py`
 
-class CategoryCreate(BaseModel):
-    name: str             # e.g. "Receipts"
-    description: str      # e.g. "Purchase receipts and invoices\nreceipt, billing, VAT, payment"
-    color: str            # Hex color like "#6366f1"
-    destination_path: str | None  # Where to move files (optional)
+Current mock search endpoint used by UI integration.
 
-class CategoryUpdate(BaseModel):
-    # All fields optional (partial update / PATCH semantics)
-    # Changing name or description triggers re-embedding
-```
+## Service Layer
 
-### `app/models/response.py`
+### AI services
 
-Key response types:
-- `FileScanResult` — metadata from scanning (path, name, size, hash, error)
-- `CategoryResponse` — category info returned to frontend
-- `FileAnalysisResponse` — AI summary + suggested name
-- `CategoryScoreResponse` — one category×file similarity score
-- `TopCategoryResponse` — the best-match category (includes `destination_path`)
-- `OrganizeFileResult` — everything combined for one file
-- `OrganizeResponse` — list of `OrganizeFileResult` (the main API response)
-- `HistoryLogResponse` — audit log entry
+- `app/services/ai/llm_client.py`
+- `app/services/ai/rag_service.py`
+- `app/services/ai/summary_service.py`
+- `app/services/ai/rename_service.py`
 
----
+### File and ingest services
 
-**Next:** [Service Layer →](./04-services.md)
+- `app/services/files/scanner_service.py`
+- `app/services/files/docling_parser.py`
+- `app/services/files/text_cache.py`
+- `app/services/background_ingest.py`
+
+### Category services
+
+- `app/services/categories/classification_service.py`
+- `app/services/categories/seed_service.py`
+- `app/services/categories/category_embedding_text.py`
+
+### Workflow and utility services
+
+- `app/services/summary_workflow_service.py`
+- `app/services/history_service.py`
+- `app/services/system_log_service.py`
+- `app/services/startup_checks.py`
+- `app/services/voyager_service.py`
+
+## Typical Debug Paths
+
+1. Organize response wrong or empty
+   - `app/api/organize.py`
+   - `app/services/files/scanner_service.py`
+   - `app/services/categories/classification_service.py`
+
+2. Summary quality issue
+   - `app/services/summary_workflow_service.py`
+   - `app/services/ai/summary_service.py`
+   - `app/services/files/docling_parser.py`
+
+3. Startup degraded health
+   - `app/main.py`
+   - `app/services/startup_checks.py`
+   - `app/services/ai/llm_client.py`
+
+4. Category behavior issue
+   - `app/api/settings/categories.py`
+   - `app/services/categories/seed_service.py`
+
+Continue with [04-services.md](./04-services.md).

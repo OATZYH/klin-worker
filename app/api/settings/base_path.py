@@ -13,6 +13,7 @@ Mounted at: /api/settings/default-base-path
 """
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,7 +27,23 @@ from app.core.ai_exceptions import (
 from app.db.models import AppSetting, Category
 from app.db.session import get_db
 from app.models.request import DefaultBasePathUpdate
-from app.models.response import CategoryResponse, DefaultBasePathResponse
+from app.models.response import (
+    CategoryResponse,
+    DefaultBasePathResponse,
+    OnboardingStatusResponse,
+)
+from app.api.settings.store import (
+    SETTING_KEY_ONBOARDING_COMPLETED_AT,
+    SETTING_KEY_ONBOARDING_SEEDED,
+    SETTING_KEY_ONBOARDING_SEEDED_AT,
+    SETTING_KEY_ONBOARDING_STARTED_AT,
+    SETTING_KEY_ONBOARDING_STATUS,
+    SETTING_KEY_SEED_VERSION,
+    get_setting_value,
+    parse_bool_setting,
+    parse_datetime_setting,
+    upsert_setting_value,
+)
 from app.services.categories.classification_service import ClassificationService
 from app.services.categories.seed_service import generate_missing_embeddings, seed_default_categories
 
@@ -53,6 +70,10 @@ def _category_to_response(cat: Category) -> CategoryResponse:
     )
 
 
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ── Routes ───────────────────────────────────────────────────────────────
 
 
@@ -64,6 +85,36 @@ async def get_default_base_path(
     setting = await db.get(AppSetting, SETTING_KEY_BASE_PATH)
     return DefaultBasePathResponse(
         default_base_path=setting.value if setting else None,
+    )
+
+
+@router.get("/onboarding", response_model=OnboardingStatusResponse)
+async def get_onboarding_status(
+    db: AsyncSession = Depends(get_db),
+) -> OnboardingStatusResponse:
+    """Get first-run onboarding and seeding state."""
+    status = await get_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, default="pending")
+    onboarding_seeded = parse_bool_setting(
+        await get_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED),
+        default=False,
+    )
+
+    has_categories_result = await db.execute(select(Category.id).limit(1))
+    has_categories = has_categories_result.scalar_one_or_none() is not None
+
+    return OnboardingStatusResponse(
+        status=status or "pending",
+        onboarding_seeded=onboarding_seeded,
+        started_at=parse_datetime_setting(
+            await get_setting_value(db, SETTING_KEY_ONBOARDING_STARTED_AT)
+        ),
+        seeded_at=parse_datetime_setting(
+            await get_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED_AT)
+        ),
+        completed_at=parse_datetime_setting(
+            await get_setting_value(db, SETTING_KEY_ONBOARDING_COMPLETED_AT)
+        ),
+        should_seed_defaults=not has_categories,
     )
 
 
@@ -98,6 +149,17 @@ async def set_default_base_path(
         setting = AppSetting(key=SETTING_KEY_BASE_PATH, value=base_path)
         db.add(setting)
 
+    started_at = await get_setting_value(db, SETTING_KEY_ONBOARDING_STARTED_AT)
+    if not started_at:
+        await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STARTED_AT, _utcnow_iso())
+
+    onboarding_seeded = await get_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED)
+    if onboarding_seeded is None:
+        await upsert_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED, "false")
+
+    await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, "base_path_set")
+    await upsert_setting_value(db, SETTING_KEY_SEED_VERSION, "1")
+
     await db.flush()
 
     # ── Seed defaults on first run ─────────────────────────────────
@@ -124,6 +186,12 @@ async def set_default_base_path(
                     "Default base path set on empty category table — seeded %d default categories.",
                     seeded,
                 )
+                await upsert_setting_value(
+                    db,
+                    SETTING_KEY_ONBOARDING_SEEDED_AT,
+                    _utcnow_iso(),
+                )
+                await upsert_setting_value(db, SETTING_KEY_ONBOARDING_SEEDED, "true")
         except AiCapabilityUnavailableError as exc:
             raise to_service_unavailable_http_exception(exc) from exc
 
@@ -168,6 +236,16 @@ async def set_default_base_path(
         base_path,
         updated_count,
     )
+
+    completed_at = await get_setting_value(db, SETTING_KEY_ONBOARDING_COMPLETED_AT)
+    if not completed_at:
+        await upsert_setting_value(
+            db,
+            SETTING_KEY_ONBOARDING_COMPLETED_AT,
+            _utcnow_iso(),
+        )
+    await upsert_setting_value(db, SETTING_KEY_ONBOARDING_STATUS, "completed")
+    await db.flush()
 
     return DefaultBasePathResponse(
         default_base_path=base_path,

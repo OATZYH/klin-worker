@@ -92,7 +92,13 @@ The server starts at `http://127.0.0.1:8000`. On first boot it will:
 curl http://127.0.0.1:8000/health
 
 # Should return:
-# {"status":"ok","version":"0.2.0","rag_ready":true}
+# {
+#   "status":"ok",
+#   "version":"0.2.0",
+#   "services": { "...": { "ok": true, "detail": "..." } },
+#   "onboarding_status":"pending",
+#   "onboarding_seeded":false
+# }
 
 # List auto-seeded categories
 curl http://127.0.0.1:8000/api/settings/categories
