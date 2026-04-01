@@ -14,10 +14,17 @@ Push-Location $projectRoot
 try {
     $specPath = Join-Path $projectRoot "klin-worker.spec"
 
-    if ($isWindowsOs) {
-        py -$PythonVersion -m PyInstaller --noconfirm --clean $specPath
+    $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+    $venvPythonUnix = Join-Path $projectRoot ".venv/bin/python"
+
+    if ($isWindowsOs -and (Test-Path $venvPython)) {
+        & $venvPython -m PyInstaller --noconfirm $specPath
+    } elseif (-not $isWindowsOs -and (Test-Path $venvPythonUnix)) {
+        & $venvPythonUnix -m PyInstaller --noconfirm $specPath
+    } elseif ($isWindowsOs) {
+        py -$PythonVersion -m PyInstaller --noconfirm $specPath
     } else {
-        python -m PyInstaller --noconfirm --clean $specPath
+        python -m PyInstaller --noconfirm $specPath
     }
 
     $binaryName = if ($isWindowsOs) { "klin-worker.exe" } else { "klin-worker" }

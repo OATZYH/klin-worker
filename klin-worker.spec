@@ -3,7 +3,7 @@
 from pathlib import Path
 import os
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 
 # In PyInstaller spec execution, __file__ is not guaranteed. Use CWD fallback.
@@ -14,6 +14,7 @@ datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "VERSION"), "."),
 ]
+datas += collect_data_files("fastapi_voyager")
 
 hiddenimports = [
     "aiosqlite",
