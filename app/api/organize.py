@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import AppSetting, Category, CategoryScore, File, FileAnalysis
+from app.db.models import Category, CategoryScore, File, FileAnalysis
 from app.core.ai_exceptions import (
     AiCapabilityUnavailableError,
     format_ai_capability_errors,
@@ -61,16 +61,15 @@ from app.services.ai.rename_service import RenameService
 from app.services.files.scanner_service import ScannerService
 from app.services.ai.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
+from app.services.lock_settings_service import LockSettingsService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["organize"])
 
-SETTING_KEY_LOCK_FILE = "lock_file"
-SETTING_KEY_LOCK_FOLDER = "lock_folder"
-
 
 # ── Categories hash — for cache invalidation ─────────────────────────────
+
 
 async def _get_categories_hash(db: AsyncSession) -> str:
     """Compute a short fingerprint of active category semantics.
@@ -87,10 +86,7 @@ async def _get_categories_hash(db: AsyncSession) -> str:
     cats = result.scalars().all()
     if not cats:
         return "no_categories"
-    cat_str = "||".join(
-        f"{c.id}:{c.name}:{(c.description or '').strip()}"
-        for c in cats
-    )
+    cat_str = "||".join(f"{c.id}:{c.name}:{(c.description or '').strip()}" for c in cats)
     return hashlib.md5(cat_str.encode()).hexdigest()
 
 
@@ -101,59 +97,6 @@ _file_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def _elapsed_ms(started_at: float) -> float:
     return round((time.perf_counter() - started_at) * 1000, 2)
-
-
-def _normalize_path(value: str) -> str:
-    return value.strip().replace("\\", "/").rstrip("/").lower()
-
-
-def _decode_paths(value: str | None) -> list[str]:
-    if not value:
-        return []
-
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(payload, list):
-        return []
-
-    output: list[str] = []
-    seen: set[str] = set()
-    for item in payload:
-        text = str(item).strip()
-        if not text:
-            continue
-        key = _normalize_path(text)
-        if key in seen:
-            continue
-        seen.add(key)
-        output.append(text)
-    return output
-
-
-async def _load_lock_settings(db: AsyncSession) -> tuple[list[str], list[str]]:
-    lock_file_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FILE)
-    lock_folder_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FOLDER)
-    return _decode_paths(lock_file_setting.value if lock_file_setting else None), _decode_paths(lock_folder_setting.value if lock_folder_setting else None)
-
-
-def _lock_reason(path: str, lock_files: list[str], lock_folders: list[str]) -> str | None:
-    normalized = _normalize_path(path)
-    if not normalized:
-        return None
-
-    for locked_file in lock_files:
-        if _normalize_path(locked_file) == normalized:
-            return f"file is directly locked: {locked_file}"
-
-    for locked_folder in lock_folders:
-        normalized_folder = _normalize_path(locked_folder)
-        if normalized == normalized_folder or normalized.startswith(f"{normalized_folder}/"):
-            return f"file is locked by folder: {locked_folder}"
-
-    return None
 
 
 def _build_locked_result(filepath: str, reason: str) -> OrganizeFileResult:
@@ -363,6 +306,10 @@ def _get_system_log() -> SystemLogService:
     return SystemLogService()
 
 
+def _get_lock_settings_service() -> LockSettingsService:
+    return LockSettingsService()
+
+
 def _normalize_selected_file_name(
     *,
     selected_name: str | None,
@@ -449,6 +396,7 @@ async def organize_files(
     rename_svc: RenameService = Depends(_get_rename),
     history_svc: HistoryService = Depends(_get_history),
     system_log_svc: SystemLogService = Depends(_get_system_log),
+    lock_svc: LockSettingsService = Depends(_get_lock_settings_service),
     text_cache: TextCache = Depends(_get_text_cache),
     ingest: BackgroundIngestWorker = Depends(_get_ingest_worker),
 ) -> OrganizeResponse:
@@ -468,15 +416,13 @@ async def organize_files(
 
     It does **not** move, rename, or delete any file.
     """
-    logger.info(
-        "Organize request — %d file(s), force=%s", len(body.file_paths), body.force
-    )
-    lock_files, lock_folders = await _load_lock_settings(db)
+    logger.info("Organize request — %d file(s), force=%s", len(body.file_paths), body.force)
+    lock_settings = await lock_svc.get_settings(db)
 
     results: dict[str, OrganizeFileResult] = {}
 
     for filepath in body.file_paths:
-        reason = _lock_reason(filepath, lock_files, lock_folders)
+        reason = lock_svc.get_lock_reason(filepath, lock_settings)
         if reason:
             logger.info("Organize skipped locked file %s (%s)", filepath, reason)
             results[filepath] = _build_locked_result(filepath, reason)
@@ -526,7 +472,9 @@ async def apply_organize_decision(
         if not selected_category_record.is_active:
             raise HTTPException(status_code=400, detail="Selected category is disabled.")
         if not selected_category_record.destination_path:
-            raise HTTPException(status_code=400, detail="Selected category has no destination folder.")
+            raise HTTPException(
+                status_code=400, detail="Selected category has no destination folder."
+            )
         destination_dir = selected_category_record.destination_path
 
     try:
@@ -705,14 +653,12 @@ async def _process_single_file_inner(
     has_cached_analysis = False
     if not is_new_file:
         has_cached_analysis = (
-            file_record.analysis is not None
-            and file_record.analysis.summary is not None
+            file_record.analysis is not None and file_record.analysis.summary is not None
         )
 
     current_cats_hash = await _get_categories_hash(db)
     cats_hash_match = (
-        has_cached_analysis
-        and file_record.analysis.categories_hash == current_cats_hash  # type: ignore[union-attr]
+        has_cached_analysis and file_record.analysis.categories_hash == current_cats_hash  # type: ignore[union-attr]
     )
 
     # ── 3a: Full cache hit ────────────────────────────────────────────
@@ -730,13 +676,15 @@ async def _process_single_file_inner(
         if cached_scores:
             cat_ids = [s.category_id for s in cached_scores]
             _cat_id_col = getattr(Category, "id")
-            cat_result = await db.execute(
-                select(Category).where(_cat_id_col.in_(cat_ids))
-            )
+            cat_result = await db.execute(select(Category).where(_cat_id_col.in_(cat_ids)))
             cat_map = {c.id: c for c in cat_result.scalars().all()}
             score_dicts = sorted(
                 [
-                    {"category_id": s.category_id, "name": cat_map[s.category_id].name, "score": s.score}
+                    {
+                        "category_id": s.category_id,
+                        "name": cat_map[s.category_id].name,
+                        "score": s.score,
+                    }
                     for s in cached_scores
                     if s.category_id in cat_map
                 ],
@@ -772,7 +720,9 @@ async def _process_single_file_inner(
         history_entry.metadata_json = json.dumps(history_metadata)
         await db.flush()
 
-        logger.info("Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings)
+        logger.info(
+            "Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings
+        )
         return OrganizeFileResult(
             file_id=file_record.id,
             analysis=FileAnalysisResponse(suggested_names=cached_names),
@@ -869,7 +819,10 @@ async def _process_single_file_inner(
             timings={},
         )
         history_entry = await history_svc.log(
-            db=db, file_id=file_record.id, action="organized_reclassified", metadata=history_metadata
+            db=db,
+            file_id=file_record.id,
+            action="organized_reclassified",
+            metadata=history_metadata,
         )
         timings["history_log_ms"] = _elapsed_ms(step_started_at)
         timings["total_ms"] = _elapsed_ms(total_started_at)
@@ -878,7 +831,9 @@ async def _process_single_file_inner(
         await db.flush()
 
         logger.info(
-            "Organize partial cache (re-classified) | file=%s | timings=%s", scan.original_path, timings
+            "Organize partial cache (re-classified) | file=%s | timings=%s",
+            scan.original_path,
+            timings,
         )
         return OrganizeFileResult(
             file_id=file_record.id,
@@ -913,9 +868,7 @@ async def _process_single_file_inner(
     elif not file_changed and not force:
         pipeline["rag_status"] = "skipped_unchanged"
     else:
-        enqueue_result = await ingest.enqueue(
-            filepath=scan.original_path, text_cache=text_cache
-        )
+        enqueue_result = await ingest.enqueue(filepath=scan.original_path, text_cache=text_cache)
         pipeline["rag_status"] = enqueue_result
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 

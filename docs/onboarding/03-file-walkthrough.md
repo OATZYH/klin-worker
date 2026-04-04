@@ -128,7 +128,6 @@ Current mock search endpoint used by UI integration.
 - `app/services/history_service.py`
 - `app/services/system_log_service.py`
 - `app/services/startup_checks.py`
-- `app/services/voyager_service.py`
 
 ## Typical Debug Paths
 

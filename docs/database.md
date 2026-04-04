@@ -124,6 +124,8 @@ Key-value store for application-wide settings (e.g. default base path).
 | `onboarding_seeded_at`        | `2026-03-16T09:58:04+00:00`        | Timestamp when default category seed completed. |
 | `onboarding_completed_at`     | `2026-03-16T09:58:05+00:00`        | Timestamp when onboarding was marked complete. |
 | `seed_version`                | `1`                                | Seed data version marker for future seed migrations. |
+| `lock_file`                   | `["C:\\path\\a.pdf"]`            | JSON list of absolute file paths excluded from AI processing. |
+| `lock_folder`                 | `["C:\\Users\\me\\Secret"]`     | JSON list of absolute folder paths excluded from AI processing (applies to descendants). |
 
 ---
 

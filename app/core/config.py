@@ -35,6 +35,7 @@ def _resolve_default_storage_dir() -> Path:
     if getattr(sys, "frozen", False):
         # Running inside a PyInstaller bundle
         import os
+
         app_data = os.environ.get("KLIN_APP_DATA_DIR")
         if app_data:
             return Path(app_data)
@@ -101,20 +102,10 @@ class Settings(BaseSettings):
 
     # ── CORS (Tauri dev mode) ────────────────────────────────────────────
     cors_origins: list[str] = [
-        "http://localhost:1420",   # Tauri dev default
-        "http://localhost:5173",   # Vite fallback
-        "tauri://localhost",       # Tauri production
+        "http://localhost:1420",  # Tauri dev default
+        "http://localhost:5173",  # Vite fallback
+        "tauri://localhost",  # Tauri production
     ]
-
-    # ── Voyager UI ───────────────────────────────────────────────────────
-    voyager_enabled: bool = True
-    voyager_mount_path: str = "/voyager"
-    voyager_swagger_url: str | None = None
-    voyager_module_prefix: str | None = None
-    voyager_online_repo_url: str | None = None
-    voyager_initial_page_policy: str = "first"
-    voyager_enable_pydantic_resolve_meta: bool = False
-    voyager_module_colors: dict[str, str] = {}
 
     # ── SQLite ───────────────────────────────────────────────────────────
     database_path: str = str(_KLIN_DIR / "klin.db")
@@ -145,8 +136,8 @@ class Settings(BaseSettings):
     # ── llama-server (out-of-process, managed by Tauri) ────────────────
     llama_server_url: str = "http://127.0.0.1:8080/"
     llama_embedding_server_url: str = "http://127.0.0.1:8081/"
-    embedding_dim_size: int = 2048        # must match model served by llama-server
-    max_token_limit: int = 4096           # used for RAG chunking
+    embedding_dim_size: int = 2048  # must match model served by llama-server
+    max_token_limit: int = 4096  # used for RAG chunking
 
     # ── Organize pipeline tuning ────────────────────────────────────────
     summary_rag_top_k: int = 2

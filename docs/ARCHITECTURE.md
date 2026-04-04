@@ -100,6 +100,7 @@ app/
       auto_organize.py       watcher and schedule config
       store.py               app_settings key helpers
   services/
+    lock_settings_service.py lock settings persistence + path matching
     ai/
       llm_client.py          async HTTP client for llama-server
       rag_service.py         RAG wrapper
@@ -118,7 +119,6 @@ app/
     history_service.py       history read/write operations
     system_log_service.py    operational log write/cleanup
     startup_checks.py        DB/LLM/RAG health checks
-    voyager_service.py       fastapi-voyager integration
 ```
 
 ## Startup and Shutdown Lifecycle
@@ -296,6 +296,16 @@ This single endpoint supports first-run seeding and later base-path updates.
 
 Note: scheduler execution logic is not yet wired into this service layer; routes currently manage persisted configuration.
 
+#### Lock Settings (`/api/settings/locks`)
+
+- `GET /api/settings/locks` returns lock settings and row metadata.
+- `PUT /api/settings/locks` fully replaces lock settings.
+- Lock values are stored in `app_settings` keys:
+  - `lock_file` as JSON `list[str]`
+  - `lock_folder` as JSON `list[str]`
+- Paths are normalized/deduplicated and validated as absolute paths.
+- Lock matching is centralized in `LockSettingsService` and reused by settings/organize flows.
+
 ### History Workflow
 
 `/api/history` provides read models over `history_logs` with enriched metadata.
@@ -414,9 +424,6 @@ Diagnostics primitives:
 - Audit trail in `history_logs`.
 - Startup checks cached and exposed via `/health`.
 - Step-level timing metadata for organize history entries.
-- Voyager ER visualization mounted at `/voyager` (configurable).
-
-Voyager integration includes a compatibility patch for `fastapi-voyager` core type handling to avoid crashes on non-class response model shapes.
 
 ## Dependency Injection and Service Lifecycles
 
@@ -465,6 +472,8 @@ Current mounted endpoints:
 - `POST /api/settings/auto-organize/folders`
 - `PATCH /api/settings/auto-organize/folders/{watcher_id}`
 - `DELETE /api/settings/auto-organize/folders/{watcher_id}`
+- `GET /api/settings/locks`
+- `PUT /api/settings/locks`
 
 ## Configuration Model
 

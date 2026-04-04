@@ -44,7 +44,6 @@ from app.services.ai.rag_service import RagService
 from app.services.categories.seed_service import generate_missing_embeddings
 from app.services.startup_checks import CheckResult, run_all_checks
 from app.services.system_log_service import SystemLogService
-from app.services.voyager_service import mount_voyager
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
@@ -125,6 +124,7 @@ async def _cleanup_system_logs() -> int:
 
 # ── Lifespan ─────────────────────────────────────────────────────────────
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown lifecycle hook."""
@@ -159,8 +159,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await _rag_service.setup()
     except Exception:
         logger.warning(
-            "RAG-Anything failed to initialise — "
-            "the API will work without semantic features."
+            "RAG-Anything failed to initialise — the API will work without semantic features."
         )
         await _write_system_log(
             level="WARNING",
@@ -251,9 +250,6 @@ app = FastAPI(
     version=settings.app_version,
     lifespan=lifespan,
 )
-
-# Voyager
-mount_voyager(app)
 
 # CORS — allow Tauri frontend in dev mode
 app.add_middleware(

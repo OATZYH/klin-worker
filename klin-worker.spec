@@ -14,8 +14,6 @@ datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "VERSION"), "."),
 ]
-datas += collect_data_files("fastapi_voyager")
-
 hiddenimports = [
     "aiosqlite",
     "alembic.command",
