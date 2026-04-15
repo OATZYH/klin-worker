@@ -36,7 +36,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "gi",
+        "triton",
+        "nvidia",
+    ],
     noarchive=False,
     optimize=0,
 )

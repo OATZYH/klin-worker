@@ -102,9 +102,11 @@ class Settings(BaseSettings):
 
     # ── CORS (Tauri dev mode) ────────────────────────────────────────────
     cors_origins: list[str] = [
-        "http://localhost:1420",  # Tauri dev default
-        "http://localhost:5173",  # Vite fallback
-        "tauri://localhost",  # Tauri production
+        "http://localhost:1420",   # Tauri dev default
+        "http://127.0.0.1:1420",   # Tauri dev (explicit IPv4 loopback)
+        "http://localhost:5173",   # Vite fallback
+        "http://127.0.0.1:5173",   # Vite fallback (explicit IPv4 loopback)
+        "tauri://localhost",       # Tauri production
     ]
 
     # ── SQLite ───────────────────────────────────────────────────────────
