@@ -24,3 +24,6 @@ prompts/
 # Tests
 klin-test/
 output/
+
+# Logs
+logs/

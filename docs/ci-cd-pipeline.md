@@ -61,9 +61,10 @@ Build matrix targets:
 Build process:
 
 1. Install build dependencies with uv.
-2. Run build-sidecar.ps1 in CI mode:
+2. Run scripts/build-sidecar.sh in production mode:
    - Skip Tauri copy stage.
    - Keep deterministic output from dist/klin-worker[.exe].
+   - Emit build metadata JSON (size, SHA256, target, tool versions).
 3. Rename assets to include version and target triple:
    - klin-worker-<version>-<target-triple>[.exe]
 4. Generate SHA256 checksum files per artifact.
@@ -89,7 +90,7 @@ This avoids drift between API-reported version and release artifacts.
 
 ## Sidecar Packaging Notes
 
-- Build script: build-sidecar.ps1
+- Build script: scripts/build-sidecar.sh
 - PyInstaller spec: klin-worker.spec
 - VERSION file is bundled into the executable package.
 - Existing local developer path copy-to-Tauri remains unchanged unless CI mode is enabled.

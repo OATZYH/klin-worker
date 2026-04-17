@@ -114,8 +114,13 @@ jobs:
         run: uv sync --extra build
 
       - name: Build sidecar
-        shell: pwsh
-        run: ./build-sidecar.ps1 -PythonVersion 3.13 -TargetTriple ${{ matrix.target_triple }} -SkipTauriCopy
+        shell: bash
+        run: |
+          bash ./scripts/build-sidecar.sh \
+            --mode production \
+            --target-triple "${{ matrix.target_triple }}" \
+            --skip-tauri-copy \
+            --metadata-file "release/build-metadata-${{ matrix.target_triple }}.json"
 
       - name: Prepare release assets
         shell: pwsh

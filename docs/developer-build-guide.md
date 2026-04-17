@@ -37,7 +37,7 @@ At runtime, the app resolves version in this order:
 
 - Python 3.13
 - uv (package manager)
-- PowerShell (pwsh) — install via `brew install powershell` on macOS/Linux, built-in on Windows
+- Bash shell (default on macOS/Linux; use Git Bash or WSL on Windows)
 - Rust toolchain (only needed if auto-detecting target triple for Tauri copy)
 
 ### Step 1 — Install dependencies
@@ -64,28 +64,29 @@ uv run pytest -q -m "not llm"
 
 ### Step 3 — Build the sidecar binary
 
-#### macOS / Linux
+#### Production mode (CI-like output)
 
 ```bash
 # Build and copy to Tauri app (default)
-pwsh ./build-sidecar.ps1
+./scripts/build-sidecar.sh --mode production
 
 # Build only, no Tauri copy (standalone test)
-pwsh ./build-sidecar.ps1 -SkipTauriCopy
+./scripts/build-sidecar.sh --mode production --skip-tauri-copy
 
 # Specify a custom target triple
-pwsh ./build-sidecar.ps1 -TargetTriple aarch64-apple-darwin
+./scripts/build-sidecar.sh --mode production --target-triple aarch64-apple-darwin
+```
+
+#### Dev mode with tracing (debug PyInstaller failures)
+
+```bash
+# Verbose build with shell tracing
+./scripts/build-sidecar.sh --mode dev --trace
 ```
 
 #### Windows
 
-```powershell
-# Build and copy to Tauri app (default)
-.\build-sidecar.ps1
-
-# Build only, no Tauri copy
-.\build-sidecar.ps1 -SkipTauriCopy
-```
+Run the same commands in Git Bash or WSL.
 
 ### Step 4 — Verify the binary
 
@@ -109,6 +110,8 @@ pwsh ./build-sidecar.ps1 -TargetTriple aarch64-apple-darwin
 
 When Tauri copy is enabled, the binary is also placed at:
 `../klin-app/src-tauri/binaries/klin-worker-<target-triple>[.exe]`
+
+Each build also writes metadata JSON (default path: `dist/build-metadata.json`) including mode, size in bytes, SHA256, target triple, and tool versions.
 
 ## Section 2: CI/CD Pipeline
 
