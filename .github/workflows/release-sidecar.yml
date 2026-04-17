@@ -5,6 +5,9 @@ name: Release Sidecar
 #     tags:
 #       - "v*.*.*"
 
+on:
+  workflow_dispatch:
+
 permissions:
   contents: write
 
