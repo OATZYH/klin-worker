@@ -214,7 +214,8 @@ if [[ "$MODE" != "production" && "$MODE" != "dev" ]]; then
   die "Invalid --mode '$MODE'. Use production or dev."
 fi
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SPEC_PATH="$PROJECT_ROOT/klin-worker.spec"
 DIST_DIR="$PROJECT_ROOT/dist"
 
