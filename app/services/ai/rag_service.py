@@ -94,6 +94,8 @@ class RagService:
 
             config = RAGAnythingConfig(
                 working_dir=str(working_dir),
+                parse_method="auto",
+                parser="docling",
             )
 
             # Keep a reference to the raw embed callable for embed_texts()

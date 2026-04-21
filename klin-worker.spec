@@ -36,7 +36,19 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        # MinerU parser — not used at runtime (we use docling).
+        # Excluding it and its heavy transitive deps shrinks the binary.
+        "mineru",
+        "magic_pdf",
+        "paddleocr",
+        "paddlepaddle",
+        "torch",
+        "torchvision",
+        "detectron2",
+        "unimernet",
+        "struct_eqtable",
+    ],
     noarchive=False,
     optimize=0,
 )

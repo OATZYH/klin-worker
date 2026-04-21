@@ -1,31 +1,40 @@
-"""
-Background Ingest Worker — two-phase docling + RAG ingestion.
+"""Background ingest worker.
 
-Phase 1 (inline, blocking): parse with docling → populate text_cache
-Phase 2 (background queue): insert content_list into RAG knowledge graph
-
-Phase 1 runs inside ``enqueue()`` so the text cache is populated before
-the summary step needs it.  Phase 2 is serialised via an asyncio.Queue
-because the local LLM is single-threaded.
-
-Usage:
-  • startup:  `await ingest_worker.start(rag_service)`
-  • enqueue:  `status = await ingest_worker.enqueue(filepath, text_cache)`
-  • shutdown: `await ingest_worker.stop()`
+Request path uses a fast docling pass to extract summary context.
+Background path reparses with a richer docling profile before inserting
+content into the RAG knowledge graph.
 """
 
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from app.services.files.docling_parser import DoclingParser
-from app.services.files.text_cache import TextCache
 
 logger = logging.getLogger(__name__)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
+
+IngestStatus = Literal["queued", "queue_full", "skipped_image"]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedIngestResult:
+    """Request-local parse result reused by the organize pipeline."""
+
+    ingest_status: IngestStatus
+    extracted_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class IngestJob:
+    """Background ingest job queued for the worker loop."""
+
+    filepath: str
+    content_list: list[dict[str, Any]] | None = None
 
 
 class BackgroundIngestWorker:
@@ -35,11 +44,13 @@ class BackgroundIngestWorker:
 
     def __init__(
         self,
-        parser: DoclingParser,
+        fast_parser: DoclingParser,
+        rich_parser: DoclingParser,
         max_queue_size: int = 1000,
     ) -> None:
-        self._parser = parser
-        self._queue: asyncio.Queue[tuple[list[dict[str, Any]], str] | None] = (
+        self._fast_parser = fast_parser
+        self._rich_parser = rich_parser
+        self._queue: asyncio.Queue[IngestJob | None] = (
             asyncio.Queue(maxsize=max_queue_size)
         )
         self._rag: Any = None
@@ -75,38 +86,37 @@ class BackgroundIngestWorker:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    async def enqueue(self, filepath: str, text_cache: TextCache) -> str:
-        """Parse file with docling (Phase 1) and queue RAG ingestion (Phase 2).
-
-        Returns:
-            ``"queued"`` — parse + enqueue succeeded
-            ``"queue_full"`` — parse OK but RAG queue is full
-            ``"parse_failed"`` — docling returned empty content
-            ``"skipped_image"`` — image file, no docling parse needed
-        """
+    async def enqueue(self, filepath: str) -> PreparedIngestResult:
+        """Prepare request-local summary text and queue background ingest."""
         path = Path(filepath)
 
-        # Images bypass docling — vision model handles summary in Step 6
         if path.suffix.lower() in _IMAGE_EXTENSIONS:
-            self._enqueue_rag_item(
-                [{"type": "image", "img_path": str(path), "page_idx": 0}],
-                filepath,
+            queue_status = self._enqueue_rag_job(
+                IngestJob(
+                    filepath=filepath,
+                    content_list=[{"type": "image", "img_path": str(path), "page_idx": 0}],
+                )
             )
-            return "skipped_image"
+            if queue_status == "queued":
+                queue_status = "skipped_image"
+            return PreparedIngestResult(ingest_status=queue_status)
 
-        # ── Phase 1: docling parse (blocking) ────────────────────────────
-        content_list = await self._parser.parse(path)
+        content_list = await self._fast_parser.parse(path)
+        extracted_text = None
+        if content_list:
+            extracted_text = self._fast_parser.extract_text(content_list) or None
+        else:
+            logger.warning(
+                "Docling[%s] parse returned empty for %s",
+                self._fast_parser.profile_name,
+                path.name,
+            )
 
-        if not content_list:
-            logger.warning("Docling parse returned empty for %s", path.name)
-            return "parse_failed"
-
-        extracted_text = self._parser.extract_text(content_list)
-        if extracted_text:
-            text_cache.set(filepath, extracted_text)
-
-        # ── Phase 2: enqueue for background RAG ingestion ────────────────
-        return self._enqueue_rag_item(content_list, filepath)
+        queue_status = self._enqueue_rag_job(IngestJob(filepath=filepath))
+        return PreparedIngestResult(
+            ingest_status=queue_status,
+            extracted_text=extracted_text,
+        )
 
     @property
     def queue_size(self) -> int:
@@ -118,17 +128,15 @@ class BackgroundIngestWorker:
 
     # ── Internals ────────────────────────────────────────────────────────
 
-    def _enqueue_rag_item(
-        self, content_list: list[dict[str, Any]], filepath: str
-    ) -> str:
-        """Put a parsed content list on the RAG queue (non-blocking)."""
+    def _enqueue_rag_job(self, job: IngestJob) -> IngestStatus:
+        """Put one background ingest job on the queue without blocking."""
         try:
-            self._queue.put_nowait((content_list, filepath))
-            self._pending.add(filepath)
-            logger.debug("Enqueued for background RAG ingest: %s", filepath)
+            self._queue.put_nowait(job)
+            self._pending.add(job.filepath)
+            logger.debug("Enqueued for background RAG ingest: %s", job.filepath)
             return "queued"
         except asyncio.QueueFull:
-            logger.warning("Ingest queue full — dropping %s", filepath)
+            logger.warning("Ingest queue full — dropping %s", job.filepath)
             return "queue_full"
 
     async def _worker_loop(self) -> None:
@@ -142,7 +150,7 @@ class BackgroundIngestWorker:
                     self._queue.task_done()
                     break
 
-                content_list, file_path = item
+                file_path = item.filepath
 
                 if not self._rag or not self._rag.is_ready:
                     logger.warning(
@@ -154,7 +162,7 @@ class BackgroundIngestWorker:
 
                 started_at = time.perf_counter()
                 try:
-                    await self._ingest_to_rag(content_list, file_path)
+                    await self._process_job(item)
                     elapsed = (time.perf_counter() - started_at) * 1000
                     logger.info(
                         "Background RAG ingest OK: %s (%.0f ms)", file_path, elapsed
@@ -177,6 +185,24 @@ class BackgroundIngestWorker:
                 logger.error("Unexpected error in ingest worker: %s", exc)
 
         logger.info("Ingest worker loop exited.")
+
+    async def _process_job(self, job: IngestJob) -> None:
+        """Resolve rich content for one job and insert it into RAG."""
+        if job.content_list is not None:
+            await self._ingest_to_rag(job.content_list, job.filepath)
+            return
+
+        content_list = await self._rich_parser.parse(job.filepath)
+        if content_list:
+            await self._ingest_to_rag(content_list, job.filepath)
+            return
+
+        logger.warning(
+            "Docling[%s] parse returned empty for %s — falling back to rag.ingest()",
+            self._rich_parser.profile_name,
+            job.filepath,
+        )
+        await self._rag.ingest(job.filepath)
 
     async def _ingest_to_rag(
         self, content_list: list[dict[str, Any]], file_path: str

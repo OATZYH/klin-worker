@@ -37,8 +37,7 @@ from app.db.migrations import run_migrations
 from app.db.session import engine
 from app.services.background_ingest import BackgroundIngestWorker
 from app.services.categories.classification_service import ClassificationService
-from app.services.files.docling_parser import DoclingParser
-from app.services.files.text_cache import TextCache
+from app.services.files.docling_parser import build_docling_parser
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
 from app.services.categories.seed_service import generate_missing_embeddings
@@ -57,19 +56,18 @@ logger = logging.getLogger(__name__)
 
 _rag_service = RagService()
 _system_log_service = SystemLogService()
-_text_cache = TextCache()
-_docling_parser = DoclingParser()
-ingest_worker = BackgroundIngestWorker(parser=_docling_parser)
+fast_docling = build_docling_parser("fast")
+rich_docling = build_docling_parser("rich")
+ingest_worker = BackgroundIngestWorker(
+    fast_parser=fast_docling,
+    rich_parser=rich_docling,
+    max_queue_size=settings.max_queue_size,
+)
 
 
 def get_rag_service() -> RagService:
     """Accessor used by dependency injection in routers."""
     return _rag_service
-
-
-def get_text_cache() -> TextCache:
-    """Accessor used by dependency injection in routers."""
-    return _text_cache
 
 
 # ── Startup check results (populated in lifespan, read by /health) ───────

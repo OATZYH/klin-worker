@@ -15,8 +15,11 @@ Performance notes:
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,12 +28,91 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True)
+class BaseDoclingConfig:
+    """Shared docling runtime config reused by all parser profiles."""
+
+    max_workers: int
+
+
+@dataclass(frozen=True, slots=True)
+class DoclingParserProfile:
+    """Named docling profile controlling parsing tradeoffs."""
+
+    name: str
+    do_ocr: bool
+    do_table_structure: bool
+
+
+@dataclass(frozen=True, slots=True)
+class DoclingParserConfig:
+    """Concrete parser config built from shared base settings + profile."""
+
+    base: BaseDoclingConfig
+    profile: DoclingParserProfile
+
+    @property
+    def fingerprint(self) -> str:
+        payload = {
+            "profile": self.profile.name,
+            "do_ocr": self.profile.do_ocr,
+            "do_table_structure": self.profile.do_table_structure,
+        }
+        return hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def get_base_docling_config() -> BaseDoclingConfig:
+    """Build the shared docling config from application settings."""
+    return BaseDoclingConfig(max_workers=settings.docling_parser_max_workers)
+
+
+def get_docling_parser_config(profile_name: str) -> DoclingParserConfig:
+    """Build a named parser config from settings without hardcoded flags."""
+    base_config = get_base_docling_config()
+
+    if profile_name == "fast":
+        profile = DoclingParserProfile(
+            name="fast",
+            do_ocr=settings.docling_fast_do_ocr,
+            do_table_structure=settings.docling_fast_do_table_structure,
+        )
+    elif profile_name == "rich":
+        profile = DoclingParserProfile(
+            name="rich",
+            do_ocr=settings.docling_rich_do_ocr,
+            do_table_structure=settings.docling_rich_do_table_structure,
+        )
+    else:
+        raise ValueError(f"Unsupported docling profile: {profile_name}")
+
+    return DoclingParserConfig(base=base_config, profile=profile)
+
+
+def get_docling_profile_fingerprint(profile_name: str) -> str:
+    """Return the deterministic fingerprint for one docling profile."""
+    return get_docling_parser_config(profile_name).fingerprint
+
+
+def build_docling_parser(profile_name: str) -> "DoclingParser":
+    """Construct a parser for the requested named profile."""
+    return DoclingParser(config=get_docling_parser_config(profile_name))
+
+
 class DoclingParser:
     """Parse documents into a RAG-Anything-compatible content list."""
 
-    def __init__(self) -> None:
-        self._executor = ThreadPoolExecutor(max_workers=2)
+    def __init__(self, config: DoclingParserConfig) -> None:
+        self._config = config
+        self._executor = ThreadPoolExecutor(max_workers=config.base.max_workers)
         self._converter: Any = None  # lazy-init to avoid import cost at startup
+
+    @property
+    def profile_name(self) -> str:
+        return self._config.profile.name
+
+    @property
+    def fingerprint(self) -> str:
+        return self._config.fingerprint
 
     def _get_converter(self) -> Any:
         if self._converter is None:
@@ -39,8 +121,8 @@ class DoclingParser:
             from docling.datamodel.pipeline_options import PdfPipelineOptions
 
             pipeline_options = PdfPipelineOptions()
-            pipeline_options.do_ocr = False             # embedded text is sufficient
-            pipeline_options.do_table_structure = False  # plain text capture is fast enough
+            pipeline_options.do_ocr = self._config.profile.do_ocr
+            pipeline_options.do_table_structure = self._config.profile.do_table_structure
 
             self._converter = DocumentConverter(
                 format_options={
@@ -141,7 +223,8 @@ class DoclingParser:
                 })
 
         logger.info(
-            "Docling parsed %s: %d items (%d text, %d tables, %d images)",
+            "Docling[%s] parsed %s: %d items (%d text, %d tables, %d images)",
+            self.profile_name,
             filepath.name,
             len(content_list),
             sum(1 for i in content_list if i["type"] == "text"),

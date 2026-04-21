@@ -145,6 +145,11 @@ class Settings(BaseSettings):
     summary_max_tokens: int = 64
     rename_max_tokens: int = 48
     rag_llm_max_tokens: int = 256
+    docling_parser_max_workers: int = 2
+    docling_fast_do_ocr: bool = False
+    docling_fast_do_table_structure: bool = False
+    docling_rich_do_ocr: bool = True
+    docling_rich_do_table_structure: bool = True
 
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85

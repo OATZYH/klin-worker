@@ -5,17 +5,17 @@ POST /api/organize — the main endpoint.
   1. Scan files for metadata
   2. Store file records in SQLite
   3. **Cache check** — return cached results instantly for unchanged files
-  4. Enqueue RAG ingestion in the background (non-blocking)
-  5. Generate summary + file embedding **in parallel**
-  6. Generate rename suggestion (needs summary)
-  7. Classify using pre-computed embedding
+    4. Prepare fast summary context + queue background RAG ingestion
+    5. Generate summary from fast parsed text
+    6. Generate rename suggestion (needs summary)
+    7. Classify using summary-enriched embedding
   8. Log history
   9. Return structured results
 
 Optimisations (v0.3):
   • Cache-first: unchanged files return cached analysis in <100 ms.
-  • Background RAG: ingestion is queued, not awaited.
-  • Parallel LLM: summary and embedding generation overlap via asyncio.gather.
+    • Background RAG: rich ingestion is queued, not awaited.
+    • Fast docling: request-time parsing stays lightweight.
   • Per-file lock: prevents race conditions on concurrent identical requests.
   • Robust upsert: FileAnalysis checked by existence, not by is_new_file flag.
 """
@@ -53,11 +53,11 @@ from app.models.response import (
 )
 from app.services.background_ingest import BackgroundIngestWorker
 from app.services.categories.classification_service import ClassificationService
-from app.services.files.text_cache import TextCache
 from app.services.history_service import HistoryService
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
 from app.services.ai.rename_service import RenameService
+from app.services.files.docling_parser import get_docling_profile_fingerprint
 from app.services.files.scanner_service import ScannerService
 from app.services.ai.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
@@ -68,15 +68,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["organize"])
 
 
-# ── Categories hash — for cache invalidation ─────────────────────────────
+# ── Analysis fingerprint — for cache invalidation ────────────────────────
 
 
-async def _get_categories_hash(db: AsyncSession) -> str:
-    """Compute a short fingerprint of active category semantics.
+async def _get_analysis_fingerprint(db: AsyncSession) -> str:
+    """Compute a fingerprint of active category semantics + parser profile.
 
-    Used to detect when active classification inputs change since a file
-    was last classified. Returns ``'no_categories'`` when there are no
-    active categories.
+    Stored in the existing ``file_analysis.categories_hash`` column so cache
+    invalidation also reacts to fast docling profile changes.
     """
     result = await db.execute(
         select(Category)
@@ -84,10 +83,11 @@ async def _get_categories_hash(db: AsyncSession) -> str:
         .order_by(Category.id)
     )
     cats = result.scalars().all()
+    parser_fingerprint = get_docling_profile_fingerprint("fast")
     if not cats:
-        return "no_categories"
+        return hashlib.md5(f"no_categories::{parser_fingerprint}".encode()).hexdigest()
     cat_str = "||".join(f"{c.id}:{c.name}:{(c.description or '').strip()}" for c in cats)
-    return hashlib.md5(cat_str.encode()).hexdigest()
+    return hashlib.md5(f"{cat_str}::{parser_fingerprint}".encode()).hexdigest()
 
 
 # ── Per-file lock to prevent concurrent processing of the same path ──────
@@ -282,12 +282,6 @@ def _get_summary() -> SummaryService:
     return SummaryService()
 
 
-def _get_text_cache() -> TextCache:
-    from app.main import get_text_cache
-
-    return get_text_cache()
-
-
 def _get_ingest_worker() -> BackgroundIngestWorker:
     from app.main import ingest_worker
 
@@ -397,7 +391,6 @@ async def organize_files(
     history_svc: HistoryService = Depends(_get_history),
     system_log_svc: SystemLogService = Depends(_get_system_log),
     lock_svc: LockSettingsService = Depends(_get_lock_settings_service),
-    text_cache: TextCache = Depends(_get_text_cache),
     ingest: BackgroundIngestWorker = Depends(_get_ingest_worker),
 ) -> OrganizeResponse:
     """
@@ -407,8 +400,8 @@ async def organize_files(
       1. Scan metadata (size, hash, extension)
       2. Upsert file record in SQLite
       3. Return cached results if file unchanged (unless ``force=True``)
-      4. Enqueue background RAG ingestion
-      5. Generate AI summary + file embedding in parallel
+            4. Parse with fast docling and queue background rich ingestion
+            5. Generate AI summary from request-local extracted text
       6. Generate rename suggestion
       7. Score against all active categories
       8. Log history
@@ -439,7 +432,6 @@ async def organize_files(
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
-            text_cache=text_cache,
             ingest=ingest,
         )
         results[filepath] = result
@@ -532,7 +524,6 @@ async def _process_single_file(
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
-    text_cache: TextCache,
     ingest: BackgroundIngestWorker,
 ) -> OrganizeFileResult:
     """
@@ -553,7 +544,6 @@ async def _process_single_file(
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
-            text_cache=text_cache,
             ingest=ingest,
         )
 
@@ -569,7 +559,6 @@ async def _process_single_file_inner(
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
-    text_cache: TextCache,
     ingest: BackgroundIngestWorker,
 ) -> OrganizeFileResult:
     """Core pipeline — assumes caller holds the per-file lock."""
@@ -647,7 +636,7 @@ async def _process_single_file_inner(
     # ── Step 3: Cache check — instant return for unchanged files ─────
     # Three outcomes:
     #   a) full hit  — file unchanged + same categories → return DB cache instantly
-    #   b) partial   — file unchanged + categories changed → re-classify only (fast)
+    #   b) partial   — file unchanged + analysis inputs changed → re-classify only (fast)
     #   c) full run  — file changed or force=True → run the whole pipeline
 
     has_cached_analysis = False
@@ -656,13 +645,14 @@ async def _process_single_file_inner(
             file_record.analysis is not None and file_record.analysis.summary is not None
         )
 
-    current_cats_hash = await _get_categories_hash(db)
-    cats_hash_match = (
-        has_cached_analysis and file_record.analysis.categories_hash == current_cats_hash  # type: ignore[union-attr]
+    current_analysis_fingerprint = await _get_analysis_fingerprint(db)
+    analysis_fingerprint_match = (
+        has_cached_analysis
+        and file_record.analysis.categories_hash == current_analysis_fingerprint  # type: ignore[union-attr]
     )
 
     # ── 3a: Full cache hit ────────────────────────────────────────────
-    if not file_changed and cats_hash_match and not force:
+    if not file_changed and analysis_fingerprint_match and not force:
         step_started_at = time.perf_counter()
         pipeline["cached"] = True
         pipeline["cache_reason"] = "full_hit"
@@ -733,7 +723,7 @@ async def _process_single_file_inner(
     if not file_changed and has_cached_analysis and not force:
         step_started_at = time.perf_counter()
         pipeline["cached"] = "partial"
-        pipeline["cache_reason"] = "categories_changed"
+        pipeline["cache_reason"] = "analysis_inputs_changed"
         pipeline["rag_status"] = "skipped_unchanged"
 
         cached_analysis = file_record.analysis
@@ -806,7 +796,7 @@ async def _process_single_file_inner(
         timings["reclassify_ms"] = _elapsed_ms(step_started_at)
 
         # Persist updated categories_hash
-        cached_analysis.categories_hash = current_cats_hash
+        cached_analysis.categories_hash = current_analysis_fingerprint
         await db.flush()
 
         category_responses = _build_category_responses(scores)
@@ -863,25 +853,25 @@ async def _process_single_file_inner(
 
     # ── Step 5: Enqueue background RAG ingestion (non-blocking) ──────
     step_started_at = time.perf_counter()
+    prepared_ingest = None
     if not rag.is_ready:
         pipeline["rag_status"] = "not_ready"
     elif not file_changed and not force:
         pipeline["rag_status"] = "skipped_unchanged"
     else:
-        enqueue_result = await ingest.enqueue(filepath=scan.original_path, text_cache=text_cache)
-        pipeline["rag_status"] = enqueue_result
+        prepared_ingest = await ingest.enqueue(filepath=scan.original_path)
+        pipeline["rag_status"] = prepared_ingest.ingest_status
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 6: Generate summary + file embedding IN PARALLEL ────────
-    # Summary and embedding generation both need LLM but can overlap:
-    # - summary uses chat completion
-    # - embedding uses the embed endpoint
-    # We generate a preliminary embedding from filename only (no summary yet)
-    # then after summary is available, compute the richer embedding.
+    # ── Step 6: Generate summary from fast parsed text ───────────────
     step_started_at = time.perf_counter()
     summary_text: str | None = None
     try:
-        summary_text = await summary_svc.summarise(scan.original_path, text_cache=text_cache)
+        extracted_text = prepared_ingest.extracted_text if prepared_ingest else None
+        summary_text = await summary_svc.summarise(
+            scan.original_path,
+            extracted_text=extracted_text,
+        )
     except AiCapabilityUnavailableError as exc:
         return await _build_ai_unavailable_result(
             db=db,
@@ -953,19 +943,19 @@ async def _process_single_file_inner(
 
     # ── Step 8: Store analysis (robust upsert) ──────────────────────
     step_started_at = time.perf_counter()
-    # Store categories_hash so the cache knows which category set this was analysed against
+    # Store the analysis fingerprint so cache invalidation follows category or parser changes
     names_json = json.dumps(suggested_names) if suggested_names else None
     if not is_new_file and file_record.analysis is not None:
         # Update existing — relationships were loaded via refresh in Step 2
         file_record.analysis.summary = summary_text
         file_record.analysis.suggested_names = names_json
-        file_record.analysis.categories_hash = current_cats_hash
+        file_record.analysis.categories_hash = current_analysis_fingerprint
     else:
         analysis = FileAnalysis(
             file_id=file_record.id,
             summary=summary_text,
             suggested_names=names_json,
-            categories_hash=current_cats_hash,
+            categories_hash=current_analysis_fingerprint,
         )
         db.add(analysis)
 

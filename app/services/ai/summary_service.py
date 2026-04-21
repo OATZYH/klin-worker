@@ -1,12 +1,10 @@
-"""
-Summary Service — AI-generated file summaries.
+"""Summary Service — AI-generated file summaries.
 
 Asks the local LLM (via llama-server, out-of-process) to produce a concise
 one-paragraph summary of a file.
 
-Text context is provided by the ``TextCache``, which is populated by the
-docling parser in the ingest worker before this service is called.
-Images go directly to the vision model — no text extraction needed.
+Text context is provided directly by the fast docling parse executed earlier
+in the organize request pipeline. Images go directly to the vision model.
 """
 
 import base64
@@ -16,12 +14,10 @@ from pathlib import Path
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.services.ai.llm_client import llm_client
-from app.services.files.text_cache import TextCache
 
 logger = logging.getLogger(__name__)
 
-# Minimum cached text length to be considered useful
-_MIN_CACHE_CONTEXT_CHARS = 40
+_MIN_EXTRACTED_TEXT_CHARS = 40
 
 
 class SummaryService:
@@ -30,24 +26,17 @@ class SummaryService:
     _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
 
     async def summarise(
-        self, file_path: str, text_cache: TextCache | None = None
+        self,
+        file_path: str,
+        extracted_text: str | None = None,
     ) -> str | None:
-        """
-        Generate a one-paragraph summary for a file.
+        """Generate a one-paragraph summary for a file."""
+        path = Path(file_path)
 
-        Strategy by file type:
-          • **Images** — send directly to the vision model.
-          • **Text/documents** — use docling-parsed text from ``text_cache``.
-        """
-        p = Path(file_path)
+        if path.suffix.lower() in self._IMAGE_EXTENSIONS:
+            return await self._summarise_image(path)
 
-        # ── Image files → direct vision model ────────────────────────
-        if p.suffix.lower() in self._IMAGE_EXTENSIONS:
-            return await self._summarise_image(p)
-
-        # ── Text / document files → text_cache context ───────────────
-        context = self._get_text_context(p, text_cache)
-
+        context = self._get_text_context(path, extracted_text)
         prompt = (
             "You are a file analysis assistant. "
             "Write a concise one-paragraph summary (2-4 sentences) of the following file content. "
@@ -71,26 +60,27 @@ class SummaryService:
             logger.error("Summary generation failed for %s: %s", file_path, exc)
             return None
 
-    # ── Image summarisation (vision model) ───────────────────────────
-
-    async def _summarise_image(self, p: Path) -> str | None:
+    async def _summarise_image(self, path: Path) -> str | None:
         """Send the image directly to the vision model for description."""
         if not llm_client.supports_vision:
             logger.warning(
                 "Vision not supported — falling back to filename-only summary for %s",
-                p.name,
+                path.name,
             )
-            return await self._summarise_image_text_fallback(p)
+            return await self._summarise_image_text_fallback(path)
 
         try:
-            image_bytes = p.read_bytes()
+            image_bytes = path.read_bytes()
             b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-            suffix = p.suffix.lower()
+            suffix = path.suffix.lower()
             mime_map = {
-                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".png": "image/png", ".gif": "image/gif",
-                ".bmp": "image/bmp", ".webp": "image/webp",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".bmp": "image/bmp",
+                ".webp": "image/webp",
                 ".tiff": "image/tiff",
             }
             mime = mime_map.get(suffix, "image/jpeg")
@@ -125,16 +115,16 @@ class SummaryService:
         except AiCapabilityUnavailableError:
             raise
         except Exception as exc:
-            logger.error("Vision summary failed for %s: %s", p.name, exc)
-            return await self._summarise_image_text_fallback(p)
+            logger.error("Vision summary failed for %s: %s", path.name, exc)
+            return await self._summarise_image_text_fallback(path)
 
-    async def _summarise_image_text_fallback(self, p: Path) -> str | None:
+    async def _summarise_image_text_fallback(self, path: Path) -> str | None:
         """Fallback summary for images when vision is unavailable."""
         prompt = (
             "You are a file analysis assistant. "
             "Write a very brief summary for an image file based only on its filename. "
             "Reply with ONLY the summary.\n\n"
-            f"Filename: {p.name}\n"
+            f"Filename: {path.name}\n"
             "Summary:"
         )
         try:
@@ -147,24 +137,14 @@ class SummaryService:
         except AiCapabilityUnavailableError:
             raise
         except Exception as exc:
-            logger.error("Image text-fallback summary failed for %s: %s", p.name, exc)
+            logger.error("Image text-fallback summary failed for %s: %s", path.name, exc)
             return None
 
-    # ── Text context retrieval ───────────────────────────────────────
-
     @staticmethod
-    def _get_text_context(p: Path, text_cache: TextCache | None) -> str:
-        """Retrieve text context from the docling-populated cache.
+    def _get_text_context(path: Path, extracted_text: str | None) -> str:
+        """Resolve summary context from fast parse output or filename fallback."""
+        if extracted_text and len(extracted_text) >= _MIN_EXTRACTED_TEXT_CHARS:
+            return extracted_text[: settings.summary_context_max_chars]
 
-        Priority:
-          1. Docling-parsed text from ``text_cache`` (covers all formats)
-          2. Filename-only fallback (parser failed or file type unsupported)
-        """
-        if text_cache is not None:
-            cached = text_cache.get(str(p))
-            if cached and len(cached) >= _MIN_CACHE_CONTEXT_CHARS:
-                text_cache.delete(str(p))  # free memory after consumption
-                return cached[: settings.summary_context_max_chars]
-
-        logger.warning("Text cache miss for %s — falling back to filename", p.name)
-        return f"Filename: {p.name}, Extension: {p.suffix}"
+        logger.warning("No extracted text for %s — falling back to filename", path.name)
+        return f"Filename: {path.name}, Extension: {path.suffix}"
