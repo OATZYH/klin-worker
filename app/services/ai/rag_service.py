@@ -23,6 +23,7 @@ import numpy as np
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,7 @@ class RagService:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    @observe(name="rag.setup", capture_input=False, capture_output=False)
     async def setup(self) -> None:
         """
         Lazy-initialise the RAG-Anything engine with llama-server as LLM backend.
@@ -185,6 +187,7 @@ class RagService:
                 },
             )
             self._ready = True
+            update_current_span(output={"ready": True, "working_dir": str(working_dir)})
             logger.info(
                 "RAG-Anything initialised  →  %s  (embd_dim: %d)",
                 working_dir,
@@ -219,6 +222,7 @@ class RagService:
 
     # ── Embedding ────────────────────────────────────────────────────────
 
+    @observe(name="rag.embed_texts", capture_input=False, capture_output=False)
     async def embed_texts(self, texts: list[str]) -> Any:
         """
         Generate embeddings for a list of texts.
@@ -227,10 +231,12 @@ class RagService:
         Used by ClassificationService for category ↔ file similarity.
         """
         await self.ensure_embedding_available()
+        update_current_span(metadata={"text_count": len(texts)})
         return await self._embed_func(texts)
 
     # ── Ingestion ────────────────────────────────────────────────────────
 
+    @observe(name="rag.ingest", capture_input=False, capture_output=False)
     async def ingest(self, file_path: str) -> bool:
         """
         Ingest a single file into the RAG engine by its absolute path.
@@ -239,6 +245,7 @@ class RagService:
         """
         self.ensure_ready()
         started_at = time.perf_counter()
+        update_current_span(input={"file_path": file_path})
 
         try:
             path = Path(file_path)
@@ -256,6 +263,7 @@ class RagService:
                 file_path,
                 (time.perf_counter() - started_at) * 1000,
             )
+            update_current_span(output={"ingested": True})
             return True
         except Exception as exc:
             logger.error(
@@ -264,6 +272,7 @@ class RagService:
                 (time.perf_counter() - started_at) * 1000,
                 exc,
             )
+            update_current_span(output={"ingested": False}, level="ERROR", status_message=str(exc))
             return False
 
     # ── Semantic Search ──────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import File, FileAnalysis
+from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
 from app.services.ai.summary_service import SummaryService
 
@@ -31,6 +32,7 @@ class SummaryWorkflowService:
     def __init__(self, summary_service: SummaryService) -> None:
         self._summary_service = summary_service
 
+    @observe(name="summary.workflow.files", capture_input=False, capture_output=False)
     async def summarise_files(
         self,
         *,
@@ -48,6 +50,7 @@ class SummaryWorkflowService:
 
         return "\n\n".join(summaries) if summaries else "No summary could be generated."
 
+    @observe(name="summary.workflow.items", capture_input=False, capture_output=False)
     async def summarise_file_items(
         self,
         *,
@@ -57,6 +60,9 @@ class SummaryWorkflowService:
     ) -> list[tuple[str, str]]:
         """Generate or reuse per-file summaries with display names."""
         await llm_client.ensure_general_available()
+        update_current_span(
+            metadata={"file_count": len(file_paths), "force": force},
+        )
 
         items: list[tuple[str, str]] = []
         for file_path in file_paths:
@@ -70,6 +76,7 @@ class SummaryWorkflowService:
 
         return items
 
+    @observe(name="summary.workflow.item", capture_input=False, capture_output=False)
     async def _get_or_generate_summary(
         self,
         *,
@@ -82,9 +89,14 @@ class SummaryWorkflowService:
             cached = await self._get_cached_summary(db=db, file_path=file_path)
             if cached:
                 logger.info("Summary cache hit | file=%s", file_path)
+                update_current_span(metadata={"cache_hit": True, "file_path": file_path})
                 return cached
 
         summary = await self._summary_service.summarise(file_path)
+        update_current_span(
+            metadata={"cache_hit": False, "file_path": file_path},
+            output={"has_summary": bool(summary)},
+        )
         if summary:
             await self._persist_summary(db=db, file_path=file_path, summary=summary)
         return summary

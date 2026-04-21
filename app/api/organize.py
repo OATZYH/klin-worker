@@ -44,6 +44,7 @@ from app.models.request import (
     ApplySelectedCategoryRequest,
     OrganizeRequest,
 )
+from app.observability.tracing import get_current_trace_id, observe, update_current_span
 from app.models.response import (
     ApplyOrganizeDecisionResponse,
     CategoryScoreResponse,
@@ -410,6 +411,10 @@ async def organize_files(
     It does **not** move, rename, or delete any file.
     """
     logger.info("Organize request — %d file(s), force=%s", len(body.file_paths), body.force)
+    update_current_span(
+        input={"file_paths": body.file_paths, "force": body.force},
+        metadata={"feature": "organize", "file_count": len(body.file_paths)},
+    )
     lock_settings = await lock_svc.get_settings(db)
 
     results: dict[str, OrganizeFileResult] = {}
@@ -548,6 +553,7 @@ async def _process_single_file(
         )
 
 
+@observe(name="organize.process_file", capture_input=False, capture_output=False)
 async def _process_single_file_inner(
     filepath: str,
     force: bool,
@@ -563,6 +569,10 @@ async def _process_single_file_inner(
 ) -> OrganizeFileResult:
     """Core pipeline — assumes caller holds the per-file lock."""
     total_started_at = time.perf_counter()
+    update_current_span(
+        input={"filepath": filepath, "force": force},
+        metadata={"trace_id": get_current_trace_id()},
+    )
     timings: dict[str, float] = {}
     pipeline: dict[str, str | bool | None] = {
         "rag_ready": rag.is_ready,
@@ -713,6 +723,10 @@ async def _process_single_file_inner(
         logger.info(
             "Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings
         )
+        update_current_span(
+            metadata={"cache_reason": "full_hit", "file_changed": file_changed},
+            output={"category_count": len(category_responses), "cached": True},
+        )
         return OrganizeFileResult(
             file_id=file_record.id,
             analysis=FileAnalysisResponse(suggested_names=cached_names),
@@ -825,6 +839,10 @@ async def _process_single_file_inner(
             scan.original_path,
             timings,
         )
+        update_current_span(
+            metadata={"cache_reason": "reclassified", "file_changed": file_changed},
+            output={"category_count": len(category_responses), "cached": True},
+        )
         return OrganizeFileResult(
             file_id=file_record.id,
             analysis=FileAnalysisResponse(suggested_names=cached_names),
@@ -859,7 +877,10 @@ async def _process_single_file_inner(
     elif not file_changed and not force:
         pipeline["rag_status"] = "skipped_unchanged"
     else:
-        prepared_ingest = await ingest.enqueue(filepath=scan.original_path)
+        prepared_ingest = await ingest.enqueue(
+            filepath=scan.original_path,
+            trace_id=get_current_trace_id(),
+        )
         pipeline["rag_status"] = prepared_ingest.ingest_status
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
@@ -1035,6 +1056,15 @@ async def _process_single_file_inner(
         file_changed,
         pipeline["rag_status"],
         timings,
+    )
+    update_current_span(
+        metadata={
+            "cache_reason": "full_run",
+            "is_new_file": is_new_file,
+            "file_changed": file_changed,
+            "rag_status": pipeline["rag_status"],
+        },
+        output={"category_count": len(category_responses), "suggestion_count": len(suggested_names)},
     )
 
     return OrganizeFileResult(

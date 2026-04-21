@@ -13,6 +13,7 @@ from pathlib import Path
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.observability.tracing import observe, update_current_generation, update_current_span
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class SummaryService:
 
     _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
 
+    @observe(name="summary.generate", capture_input=False, capture_output=False)
     async def summarise(
         self,
         file_path: str,
@@ -32,6 +34,7 @@ class SummaryService:
     ) -> str | None:
         """Generate a one-paragraph summary for a file."""
         path = Path(file_path)
+        update_current_span(input={"file_path": file_path, "has_extracted_text": bool(extracted_text)})
 
         if path.suffix.lower() in self._IMAGE_EXTENSIONS:
             return await self._summarise_image(path)
@@ -53,6 +56,7 @@ class SummaryService:
                 temperature=0.3,
                 max_tokens=settings.summary_max_tokens,
             )
+            update_current_span(output={"has_summary": bool(content), "mode": "text"})
             return content.strip() or None
         except AiCapabilityUnavailableError:
             raise
@@ -60,6 +64,7 @@ class SummaryService:
             logger.error("Summary generation failed for %s: %s", file_path, exc)
             return None
 
+    @observe(name="summary.generate_image", capture_input=False, capture_output=False)
     async def _summarise_image(self, path: Path) -> str | None:
         """Send the image directly to the vision model for description."""
         if not llm_client.supports_vision:
@@ -111,6 +116,7 @@ class SummaryService:
                 temperature=0.3,
                 max_tokens=settings.summary_max_tokens,
             )
+            update_current_generation(output={"has_summary": bool(content), "mode": "vision"})
             return content.strip() or None
         except AiCapabilityUnavailableError:
             raise
@@ -118,6 +124,7 @@ class SummaryService:
             logger.error("Vision summary failed for %s: %s", path.name, exc)
             return await self._summarise_image_text_fallback(path)
 
+    @observe(name="summary.generate_image_fallback", capture_input=False, capture_output=False)
     async def _summarise_image_text_fallback(self, path: Path) -> str | None:
         """Fallback summary for images when vision is unavailable."""
         prompt = (

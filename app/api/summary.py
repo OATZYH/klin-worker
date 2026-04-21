@@ -31,6 +31,7 @@ from app.core.ai_exceptions import (
 )
 from app.core.config import settings
 from app.db.session import get_db
+from app.observability.tracing import observe, start_as_current_observation, update_current_span
 from app.services.ai.llm_client import llm_client
 from app.services.ai.summary_service import SummaryService
 from app.services.summary_workflow_service import SummaryWorkflowService
@@ -194,6 +195,7 @@ def _build_compose_prompt(per_file_summaries: list[tuple[str, str]]) -> str:
 
 
 @router.post("/summary", response_model=SummaryResponse)
+@observe(name="summary.request", capture_input=False, capture_output=False)
 async def summarise_files(
     body: SummaryRequest,
     db: AsyncSession = Depends(get_db),
@@ -207,6 +209,10 @@ async def summarise_files(
     regenerate.  Freshly generated summaries are persisted back to the DB.
     """
     logger.info("Summary request — %d file(s), force=%s", len(body.file_paths), body.force)
+    update_current_span(
+        input={"file_paths": body.file_paths, "force": body.force},
+        metadata={"feature": "summary", "file_count": len(body.file_paths)},
+    )
 
     for fp in body.file_paths:
         logger.debug("Queued summary request item | file=%s", fp)
@@ -257,6 +263,7 @@ async def summarise_files(
 
 
 @router.post("/summary/stream")
+@observe(name="summary.stream_request", capture_input=False, capture_output=False)
 async def summarise_files_stream(
     body: SummaryRequest,
     db: AsyncSession = Depends(get_db),
@@ -268,6 +275,10 @@ async def summarise_files_stream(
         "Summary stream request — %d file(s), force=%s",
         len(body.file_paths),
         body.force,
+    )
+    update_current_span(
+        input={"file_paths": body.file_paths, "force": body.force},
+        metadata={"feature": "summary_stream", "file_count": len(body.file_paths)},
     )
 
     try:
@@ -300,12 +311,17 @@ async def summarise_files_stream(
         else:
             prompt = _build_compose_prompt(per_file_summaries)
             try:
-                async for token in llm_client.achat_stream(
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.25,
-                    max_tokens=max(settings.summary_max_tokens * 3, 700),
+                with start_as_current_observation(
+                    name="summary.compose_stream",
+                    as_type="span",
+                    input={"file_count": len(per_file_summaries)},
                 ):
-                    yield f"event: chunk\ndata: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
+                    async for token in llm_client.achat_stream(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.25,
+                        max_tokens=max(settings.summary_max_tokens * 3, 700),
+                    ):
+                        yield f"event: chunk\ndata: {json.dumps({'delta': token}, ensure_ascii=False)}\n\n"
             except Exception as exc:
                 logger.warning("Summary stream failed, using fallback format: %s", exc)
                 fallback_text = _fallback_markdown(per_file_summaries)

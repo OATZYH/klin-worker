@@ -10,6 +10,7 @@ import re
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.observability.tracing import observe, update_current_generation
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 class RenameService:
     """Generate intelligent rename suggestions using the local LLM."""
 
+    @observe(name="rename.suggest", capture_input=False, capture_output=False)
     async def suggest_names(
         self,
         original_name: str,
@@ -59,6 +61,10 @@ class RenameService:
                 clean = re.sub(r"[^\w\-]", "_", line).strip("_")
                 if clean:
                     names.append(f"{clean}{extension}")
+            update_current_generation(
+                input={"original_name": original_name, "count": count},
+                output={"suggestion_count": len(names)},
+            )
             return names[:count] if names else []
         except AiCapabilityUnavailableError:
             raise

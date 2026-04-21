@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from app.observability.tracing import get_current_trace_id, start_as_current_observation, update_current_span
 from app.services.files.docling_parser import DoclingParser
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class IngestJob:
 
     filepath: str
     content_list: list[dict[str, Any]] | None = None
+    trace_id: str | None = None
 
 
 class BackgroundIngestWorker:
@@ -86,15 +88,17 @@ class BackgroundIngestWorker:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    async def enqueue(self, filepath: str) -> PreparedIngestResult:
+    async def enqueue(self, filepath: str, trace_id: str | None = None) -> PreparedIngestResult:
         """Prepare request-local summary text and queue background ingest."""
         path = Path(filepath)
+        trace_id = trace_id or get_current_trace_id()
 
         if path.suffix.lower() in _IMAGE_EXTENSIONS:
             queue_status = self._enqueue_rag_job(
                 IngestJob(
                     filepath=filepath,
                     content_list=[{"type": "image", "img_path": str(path), "page_idx": 0}],
+                    trace_id=trace_id,
                 )
             )
             if queue_status == "queued":
@@ -112,7 +116,7 @@ class BackgroundIngestWorker:
                 path.name,
             )
 
-        queue_status = self._enqueue_rag_job(IngestJob(filepath=filepath))
+        queue_status = self._enqueue_rag_job(IngestJob(filepath=filepath, trace_id=trace_id))
         return PreparedIngestResult(
             ingest_status=queue_status,
             extracted_text=extracted_text,
@@ -152,32 +156,46 @@ class BackgroundIngestWorker:
 
                 file_path = item.filepath
 
-                if not self._rag or not self._rag.is_ready:
-                    logger.warning(
-                        "RAG not ready — skipping background ingest for %s", file_path
-                    )
-                    self._pending.discard(file_path)
-                    self._queue.task_done()
-                    continue
+                with start_as_current_observation(
+                    name="background_ingest.process_job",
+                    as_type="span",
+                    trace_context={"trace_id": item.trace_id} if item.trace_id else None,
+                    input={"file_path": file_path},
+                    metadata={"queue_size": self._queue.qsize()},
+                ):
+                    if not self._rag or not self._rag.is_ready:
+                        logger.warning(
+                            "RAG not ready — skipping background ingest for %s", file_path
+                        )
+                        update_current_span(output={"ingested": False, "reason": "rag_not_ready"})
+                        self._pending.discard(file_path)
+                        self._queue.task_done()
+                        continue
 
-                started_at = time.perf_counter()
-                try:
-                    await self._process_job(item)
-                    elapsed = (time.perf_counter() - started_at) * 1000
-                    logger.info(
-                        "Background RAG ingest OK: %s (%.0f ms)", file_path, elapsed
-                    )
-                except Exception as exc:
-                    elapsed = (time.perf_counter() - started_at) * 1000
-                    logger.error(
-                        "Background RAG ingest error: %s (%.0f ms): %s",
-                        file_path,
-                        elapsed,
-                        exc,
-                    )
-                finally:
-                    self._pending.discard(file_path)
-                    self._queue.task_done()
+                    started_at = time.perf_counter()
+                    try:
+                        await self._process_job(item)
+                        elapsed = (time.perf_counter() - started_at) * 1000
+                        logger.info(
+                            "Background RAG ingest OK: %s (%.0f ms)", file_path, elapsed
+                        )
+                        update_current_span(output={"ingested": True, "elapsed_ms": round(elapsed, 2)})
+                    except Exception as exc:
+                        elapsed = (time.perf_counter() - started_at) * 1000
+                        logger.error(
+                            "Background RAG ingest error: %s (%.0f ms): %s",
+                            file_path,
+                            elapsed,
+                            exc,
+                        )
+                        update_current_span(
+                            output={"ingested": False, "elapsed_ms": round(elapsed, 2)},
+                            level="ERROR",
+                            status_message=str(exc),
+                        )
+                    finally:
+                        self._pending.discard(file_path)
+                        self._queue.task_done()
 
             except asyncio.CancelledError:
                 break

@@ -15,9 +15,10 @@ FastAPI application entry point.
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -35,6 +36,17 @@ from app.api.summary import router as summary_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
 from app.db.session import engine
+from app.observability.tracing import (
+    create_trace_id,
+    flush_langfuse,
+    get_current_trace_id,
+    init_langfuse,
+    propagate_trace_attributes,
+    reset_current_request_trace_id,
+    set_current_request_trace_id,
+    start_as_current_observation,
+    update_current_span,
+)
 from app.services.background_ingest import BackgroundIngestWorker
 from app.services.categories.classification_service import ClassificationService
 from app.services.files.docling_parser import build_docling_parser
@@ -129,6 +141,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     global _startup_checks
 
     logger.info("🚀  Starting %s v%s", settings.app_name, settings.app_version)
+    init_langfuse()
 
     # ── 1. Ensure data directory exists ──────────────────────────────
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
@@ -229,6 +242,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # ── Shutdown ─────────────────────────────────────────────────────
     await ingest_worker.stop()
     await llm_client.shutdown()
+    flush_langfuse()
     await _write_system_log(
         level="INFO",
         event_type="app_shutdown",
@@ -257,6 +271,71 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _feature_tag(path: str) -> str:
+    if path.startswith("/api/organize"):
+        return "organize"
+    if path.startswith("/api/summary"):
+        return "summary"
+    if path.startswith("/api/history"):
+        return "history"
+    if path.startswith("/api/settings"):
+        return "settings"
+    if path.startswith("/health"):
+        return "health"
+    return "api"
+
+
+@app.middleware("http")
+async def langfuse_request_middleware(request: Request, call_next):
+    path = request.url.path
+    method = request.method.upper()
+    trace_name = f"{method} {path}"
+    feature = _feature_tag(path)
+    trace_id = create_trace_id(seed=f"{method}:{path}:{perf_counter()}")
+    request_token = set_current_request_trace_id(trace_id)
+    request.state.langfuse_trace_id = trace_id
+
+    with start_as_current_observation(
+        name=trace_name,
+        as_type="span",
+        trace_context={"trace_id": trace_id} if trace_id else None,
+        input={
+            "method": method,
+            "path": path,
+            "query": dict(request.query_params),
+        },
+        metadata={
+            "feature": feature,
+            "component": "fastapi",
+        },
+    ):
+        with propagate_trace_attributes(
+            metadata={"feature": feature, "method": method, "path": path},
+            version=settings.app_version,
+            tags=[feature],
+            trace_name=trace_name,
+        ):
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                update_current_span(
+                    output={"status": "error"},
+                    metadata={"feature": feature},
+                    level="ERROR",
+                    status_message=str(exc),
+                )
+                reset_current_request_trace_id(request_token)
+                raise
+
+            response.headers["X-Langfuse-Trace-Id"] = get_current_trace_id() or ""
+            update_current_span(
+                output={"status_code": response.status_code},
+                metadata={"feature": feature},
+            )
+            reset_current_request_trace_id(request_token)
+            return response
 
 # Routers
 app.include_router(organize_router)

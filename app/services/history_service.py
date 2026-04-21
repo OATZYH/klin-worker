@@ -14,6 +14,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import File, HistoryLog
+from app.observability.tracing import observe
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class HistoryService:
 
     # ── Write ────────────────────────────────────────────────────────────
 
+    @observe(name="history.log", capture_input=False, capture_output=False)
     async def log(
         self,
         db: AsyncSession,
@@ -43,6 +45,7 @@ class HistoryService:
 
     # ── Read ─────────────────────────────────────────────────────────────
 
+    @observe(name="history.get_by_file", capture_input=False, capture_output=False)
     async def get_by_file(
         self,
         db: AsyncSession,
@@ -67,6 +70,7 @@ class HistoryService:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    @observe(name="history.get_recent", capture_input=False, capture_output=False)
     async def get_recent(
         self,
         db: AsyncSession,
@@ -85,6 +89,7 @@ class HistoryService:
         )
         return logs
 
+    @observe(name="history.get_recent_page", capture_input=False, capture_output=False)
     async def get_recent_page(
         self,
         db: AsyncSession,

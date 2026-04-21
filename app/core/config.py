@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     app_name: str = "klin-worker"
     app_version: str = _resolve_app_version()
     debug: bool = False
+    app_environment: str = "development"
 
     # ── Server ───────────────────────────────────────────────────────────
     host: str = "127.0.0.1"
@@ -163,6 +164,15 @@ class Settings(BaseSettings):
     system_log_retention_days: int = 30
     cleanup_system_logs_on_startup: bool = True
 
+    # ── Langfuse Tracing ─────────────────────────────────────────────────
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_debug: bool = False
+    langfuse_sample_rate: float = 1.0
+    langfuse_max_payload_chars: int = 4000
+
     # ── File Watcher (future) ────────────────────────────────────────────
     watch_directories: list[str] = []
     watch_poll_interval_seconds: int = 5
@@ -187,6 +197,10 @@ class Settings(BaseSettings):
     @property
     def max_token_size(self) -> int:
         return self.max_token_limit
+
+    @property
+    def langfuse_environment(self) -> str:
+        return self.app_environment or ("development" if self.debug else "production")
 
 
 # Singleton – import this everywhere
