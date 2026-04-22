@@ -140,14 +140,14 @@ class Settings(BaseSettings):
     embedding_dim_size: int = 768  # must match model served by llama-server
     llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
     llm_output_max_tokens: int = 4096
-    rag_embedding_input_max_tokens: int = 8192 # nomic full context
+    rag_embedding_input_max_tokens: int = 2048  # must match --ctx-size of embedding llama-server
 
     # ── Summary service tuning ──────────────────────────────────────────
     summary_retrieval_top_k: int = 2
     summary_output_max_tokens: int = 2048
 
     # ── Rename service tuning ───────────────────────────────────────────
-    rename_output_max_tokens: int = 48
+    rename_output_max_tokens: int = 96
 
     # ── RAG service tuning ──────────────────────────────────────────────
     rag_output_max_tokens: int = 512

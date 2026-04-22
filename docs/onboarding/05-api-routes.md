@@ -36,7 +36,7 @@ Response shape:
   "results": {
     "/absolute/path/to/file.pdf": {
       "file_id": "...",
-      "analysis": { "suggested_names": ["name1.pdf", "name2.pdf"] },
+      "suggested_names": ["name1.pdf", "name2.pdf"],
       "categories": [
         { "category_id": "...", "name": "Finance & Invoices", "score": 91.2 }
       ],
@@ -84,8 +84,7 @@ Request:
 
 ```json
 {
-  "file_paths": ["/absolute/path/to/file.pdf"],
-  "force": false
+  "file_path": "/absolute/path/to/file.pdf"
 }
 ```
 
@@ -93,15 +92,14 @@ Response:
 
 ```json
 {
-  "summary": "## Overview ...",
-  "suggested_title": "Summary - file",
+  "summary": "Single-file summary text...",
   "processing_time_ms": 1234
 }
 ```
 
 ### `POST /api/summary/stream`
 
-Server-sent events stream for progressive rendering.
+Server-sent events stream for the same single-file summary result.
 
 Events:
 

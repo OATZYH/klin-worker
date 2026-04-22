@@ -371,9 +371,9 @@ Append-only audit trail of every action performed on a file. Analysis events (`o
 
 | `action`             | เมื่อไหร่                    | `metadata_json` มีอะไร                        |
 | -------------------- | ---------------------------- | ---------------------------------------------- |
-| `organized`          | `/api/organize` สำเร็จ (full run) | `suggested_names[]`, `all_scores[]`       |
-| `organized_cached`   | `/api/organize` cache full hit | `suggested_names[]`, `all_scores[]`, `pipeline`, `timings` |
-| `organized_reclassified` | `/api/organize` partial (categories changed) | `suggested_names[]`, `all_scores[]`, `pipeline`, `timings` |
+| `organized`          | `/api/organize` สำเร็จ (full run) | `suggested_names[]`, `all_scores[]`, compact `pipeline`, `timings.total_ms` |
+| `organized_cached`   | `/api/organize` cache full hit | `suggested_names[]`, `all_scores[]`, compact `pipeline`, `timings.total_ms` |
+| `organized_reclassified` | `/api/organize` partial (categories changed) | `suggested_names[]`, `all_scores[]`, compact `pipeline`, `timings.total_ms` |
 | `renamed`            | user ยืนยัน rename อย่างเดียว | `file_name`, `source_path`, `new_path` |
 | `moved`              | user ยืนยัน move อย่างเดียว | `file_name`, `source_path`, `selected_category{id,name,score}`, `new_path` |
 | `renamed_moved`      | user ยืนยัน rename + move | `file_name`, `source_path`, `selected_category{id,name,score}`, `new_path` |

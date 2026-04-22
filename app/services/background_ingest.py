@@ -13,13 +13,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.observability.tracing import get_current_trace_id, start_as_current_observation, update_current_span
+from app.services.ai.rag_service import ensure_rag_doc_status_compatible
 from app.services.files.docling_parser import DoclingParser
 
 logger = logging.getLogger(__name__)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
 
-IngestStatus = Literal["queued", "queue_full", "skipped_image"]
+IngestStatus = Literal["queued", "queue_full", "skipped_image", "not_ready"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,21 +89,31 @@ class BackgroundIngestWorker:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    async def enqueue(self, filepath: str, trace_id: str | None = None) -> PreparedIngestResult:
-        """Prepare request-local summary text and queue background ingest."""
+    async def prepare(
+        self,
+        filepath: str,
+        trace_id: str | None = None,
+        *,
+        enqueue_for_rag: bool = True,
+    ) -> PreparedIngestResult:
+        """Prepare request-local summary text and optionally queue background ingest."""
         path = Path(filepath)
         trace_id = trace_id or get_current_trace_id()
 
         if path.suffix.lower() in _IMAGE_EXTENSIONS:
-            queue_status = self._enqueue_rag_job(
-                IngestJob(
-                    filepath=filepath,
-                    content_list=[{"type": "image", "img_path": str(path), "page_idx": 0}],
-                    trace_id=trace_id,
+            queue_status: IngestStatus = "skipped_image"
+            if enqueue_for_rag and self._can_queue_rag_jobs():
+                queue_result = self._enqueue_rag_job(
+                    IngestJob(
+                        filepath=filepath,
+                        content_list=[{"type": "image", "img_path": str(path), "page_idx": 0}],
+                        trace_id=trace_id,
+                    )
                 )
-            )
-            if queue_status == "queued":
-                queue_status = "skipped_image"
+                if queue_result == "queue_full":
+                    queue_status = queue_result
+            elif enqueue_for_rag:
+                queue_status = "not_ready"
             return PreparedIngestResult(ingest_status=queue_status)
 
         content_list = await self._fast_parser.parse(path)
@@ -116,11 +127,19 @@ class BackgroundIngestWorker:
                 path.name,
             )
 
-        queue_status = self._enqueue_rag_job(IngestJob(filepath=filepath, trace_id=trace_id))
+        queue_status: IngestStatus = "not_ready"
+        if enqueue_for_rag and self._can_queue_rag_jobs():
+            queue_status = self._enqueue_rag_job(
+                IngestJob(filepath=filepath, trace_id=trace_id)
+            )
         return PreparedIngestResult(
             ingest_status=queue_status,
             extracted_text=extracted_text,
         )
+
+    async def enqueue(self, filepath: str, trace_id: str | None = None) -> PreparedIngestResult:
+        """Backward-compatible wrapper for prepare(queue=True)."""
+        return await self.prepare(filepath, trace_id=trace_id, enqueue_for_rag=True)
 
     @property
     def queue_size(self) -> int:
@@ -129,6 +148,10 @@ class BackgroundIngestWorker:
     def is_pending(self, file_path: str) -> bool:
         """Check if a file is still waiting to be ingested."""
         return file_path in self._pending
+
+    def _can_queue_rag_jobs(self) -> bool:
+        """Return whether the worker can accept jobs that should reach RAG."""
+        return self._running and self._rag is not None and self._rag.is_ready
 
     # ── Internals ────────────────────────────────────────────────────────
 
@@ -227,6 +250,7 @@ class BackgroundIngestWorker:
     ) -> None:
         """Insert pre-parsed content into RAG knowledge graph."""
         rag_engine = self._rag._rag  # noqa: SLF001 — access RAGAnything instance
+        await ensure_rag_doc_status_compatible(rag_engine)
 
         if hasattr(rag_engine, "insert_content_list"):
             await rag_engine.insert_content_list(

@@ -14,6 +14,7 @@ manage a separate vector store.
 LLM backend: llama-server (out-of-process, managed by Tauri).
 """
 
+from dataclasses import fields
 import logging
 from pathlib import Path
 import time
@@ -27,6 +28,67 @@ from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_doc_status_record(doc_id: str, record: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """Normalize persisted LightRAG doc-status records to the active dataclass shape."""
+    if not isinstance(record, dict):
+        logger.warning("Skipping invalid doc-status record for %s: expected dict", doc_id)
+        return None, []
+
+    from lightrag.base import DocProcessingStatus
+
+    allowed_keys = {field.name for field in fields(DocProcessingStatus)}
+    sanitized = record.copy()
+    sanitized.pop("content", None)
+    sanitized.setdefault("file_path", "no-file-path")
+    sanitized.setdefault("metadata", {})
+    sanitized.setdefault("error_msg", None)
+    sanitized.setdefault("chunks_list", [])
+
+    unknown_keys = sorted(key for key in sanitized if key not in allowed_keys)
+    for key in unknown_keys:
+        sanitized.pop(key, None)
+
+    return sanitized, unknown_keys
+
+
+async def ensure_rag_doc_status_compatible(rag_engine: Any) -> int:
+    """Remove stale/unknown doc-status fields before LightRAG deserializes them."""
+    if hasattr(rag_engine, "_ensure_lightrag_initialized"):
+        init_result = await rag_engine._ensure_lightrag_initialized()  # noqa: SLF001
+        if isinstance(init_result, dict) and not init_result.get("success", False):
+            error = init_result.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(str(error))
+
+    lightrag = getattr(rag_engine, "lightrag", None)
+    doc_status = getattr(lightrag, "doc_status", None)
+    storage_lock = getattr(doc_status, "_storage_lock", None)
+    storage_data = getattr(doc_status, "_data", None)
+    if doc_status is None or storage_lock is None or storage_data is None:
+        return 0
+
+    updates: dict[str, dict[str, Any]] = {}
+    dropped_keys: dict[str, list[str]] = {}
+    async with storage_lock:
+        for doc_id, record in storage_data.items():
+            sanitized, unknown_keys = _sanitize_doc_status_record(doc_id, record)
+            if sanitized is None or sanitized == record:
+                continue
+            updates[doc_id] = sanitized
+            if unknown_keys:
+                dropped_keys[doc_id] = unknown_keys
+
+    if not updates:
+        return 0
+
+    await doc_status.upsert(updates)
+    logger.warning(
+        "Normalized %d LightRAG doc-status record(s) for compatibility: %s",
+        len(updates),
+        dropped_keys,
+    )
+    return len(updates)
 
 
 def _coerce_positive_int(value: Any) -> int | None:

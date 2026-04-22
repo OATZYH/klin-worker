@@ -42,9 +42,9 @@ class SummaryService:
         context = self._get_text_context(path, extracted_text)
         prompt = (
             "You are a file analysis assistant. "
-            "Write a concise one-paragraph summary (2-4 sentences) of the following file content. "
-            "Focus on what the file is about and its key topics. "
-            "Reply with ONLY the summary, no headers or labels.\n\n"
+            "Read the following file content carefully and write a clear, informative summary (3-5 sentences). "
+            "Cover: what the file is about, key topics or findings, and any important details such as names, dates, or numbers. "
+            "Reply with ONLY the summary paragraph, no headers or labels.\n\n"
             f"File: {file_path}\n"
             f"Content:\n{context}\n\n"
             "Summary:"
@@ -97,10 +97,10 @@ class SummaryService:
                         {
                             "type": "text",
                             "text": (
-                                "You are a file analysis assistant. "
-                                "Describe this image in a concise one-paragraph summary (2-4 sentences). "
-                                "Focus on the main subject, text content (if any), and visual elements. "
-                                "Reply with ONLY the summary, no headers or labels."
+                                "You are a visual analysis assistant. "
+                                "Examine this image and write a clear summary (3-5 sentences). "
+                                "Cover: the main subject or scene, any visible text or data, notable visual elements, and the likely purpose of the image. "
+                                "Reply with ONLY the summary paragraph, no headers or labels."
                             ),
                         },
                         {
@@ -129,10 +129,10 @@ class SummaryService:
         """Fallback summary for images when vision is unavailable."""
         prompt = (
             "You are a file analysis assistant. "
-            "Write a very brief summary for an image file based only on its filename. "
-            "Reply with ONLY the summary.\n\n"
+            "Based only on the filename below, infer what this image likely contains and write a brief one-sentence description. "
+            "Reply with ONLY the description.\n\n"
             f"Filename: {path.name}\n"
-            "Summary:"
+            "Description:"
         )
         try:
             content = await llm_client.achat(

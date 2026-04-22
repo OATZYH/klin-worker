@@ -82,6 +82,28 @@ class LlmClient:
                             part["text"] = self._truncate_text_value(text_value, max_chars)
         return guarded_messages
 
+    @staticmethod
+    def _chat_template_kwargs() -> dict[str, bool]:
+        return {"enable_thinking": False}
+
+    def _build_chat_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": self._chat_template_kwargs(),
+        }
+        if stream:
+            body["stream"] = True
+        return body
+
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     @observe(name="llm.startup", capture_input=False, capture_output=False)
@@ -122,7 +144,7 @@ class LlmClient:
         except AiCapabilityUnavailableError as exc:
             logger.warning("Embeddings support: false (%s)", exc.detail)
 
-    @observe(name="llm.shutdown", capture_input=False, capture_output=False)
+    # @observe(name="llm.shutdown", capture_input=False, capture_output=False)
     async def shutdown(self) -> None:
         """Close the httpx client.  Call at app shutdown."""
         if self._chat_client is not None:
@@ -153,7 +175,7 @@ class LlmClient:
     def is_loaded(self) -> bool:
         return self.is_ready
 
-    @observe(name="llm.ensure_general", capture_input=False, capture_output=False)
+    @observe(name="llm.ensure_general", capture_input=False, capture_output=True)
     async def ensure_general_available(self) -> None:
         """Validate that the llama-server can handle general chat requests."""
         self._assert_chat_client_started()
@@ -163,7 +185,8 @@ class LlmClient:
             resp = await self._chat_client.get("/models", timeout=10.0)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
-            models = data.get("data", [])
+            # Support both OpenAI-compat {"data": [...]} and llama-server {"models": [...]}
+            models = data.get("data") or data.get("models") or []
             self._chat_server_reachable = True
 
             if not models:
@@ -174,10 +197,24 @@ class LlmClient:
                     "General AI is unavailable because llama-server has no loaded model.",
                 )
 
-            self._model_id = models[0].get("id", "unknown")
+            first = models[0]
+            self._model_id = (
+                first.get("id") or first.get("name") or first.get("model") or "unknown"
+            )
+
+            # capabilities live in "models" array (llama-server format), not "data" array.
+            # Check it explicitly regardless of which list was used above.
+            _capabilities: list[str] = []
+            for m in data.get("models") or []:
+                if (m.get("id") or m.get("name") or m.get("model")) == self._model_id:
+                    _capabilities = [c.lower() for c in (m.get("capabilities") or [])]
+                    break
+
             _vision_keywords = ("vl", "vision", "multimodal", "mm")
-            name_lower = self._model_id.lower()
-            self._vision_supported = any(kw in name_lower for kw in _vision_keywords)
+            if _capabilities:
+                self._vision_supported = any(kw in _capabilities for kw in _vision_keywords)
+            else:
+                self._vision_supported = any(kw in self._model_id.lower() for kw in _vision_keywords)
             update_current_span(output={"model": self._model_id, "vision_supported": self._vision_supported})
         except AiCapabilityUnavailableError:
             raise
@@ -188,7 +225,7 @@ class LlmClient:
                 "General AI is unavailable because llama-server cannot be reached.",
             ) from exc
 
-    @observe(name="llm.ensure_embedding", capture_input=False, capture_output=False)
+    @observe(name="llm.ensure_embedding", capture_input=False, capture_output=True)
     async def ensure_embedding_available(
         self,
         *,
@@ -235,18 +272,19 @@ class LlmClient:
         """
         self._assert_chat_client_started()
         guarded_messages = self._apply_input_char_guard(messages)
-
-        body: dict[str, Any] = {
-            "messages": guarded_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or settings.llm_output_max_tokens,
-        }
+        requested_max_tokens = max_tokens or settings.llm_output_max_tokens
+        body = self._build_chat_request_body(
+            guarded_messages,
+            temperature=temperature,
+            max_tokens=requested_max_tokens,
+        )
         update_current_generation(
             input={"messages": sanitize_messages(guarded_messages)},
             model=self._model_id or None,
             model_parameters={
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.llm_output_max_tokens,
+                "max_tokens": requested_max_tokens,
+                "enable_thinking": False,
             },
         )
 
@@ -321,13 +359,13 @@ class LlmClient:
         """Stream chat completion tokens from llama-server."""
         self._assert_chat_client_started()
         guarded_messages = self._apply_input_char_guard(messages)
-
-        body: dict[str, Any] = {
-            "messages": guarded_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens or settings.llm_output_max_tokens,
-            "stream": True,
-        }
+        requested_max_tokens = max_tokens or settings.llm_output_max_tokens
+        body = self._build_chat_request_body(
+            guarded_messages,
+            temperature=temperature,
+            max_tokens=requested_max_tokens,
+            stream=True,
+        )
         aggregated: list[str] = []
         first_token_at: datetime | None = None
 
@@ -338,7 +376,8 @@ class LlmClient:
             model=self._model_id or None,
             model_parameters={
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.llm_output_max_tokens,
+                "max_tokens": requested_max_tokens,
+                "enable_thinking": False,
                 "stream": True,
             },
         ):
@@ -429,20 +468,22 @@ class LlmClient:
 
         try:
             guarded_messages = self._apply_input_char_guard(messages)
+            requested_max_tokens = max_tokens or settings.llm_output_max_tokens
             update_current_generation(
                 input={"messages": sanitize_messages(guarded_messages)},
                 model=self._model_id or None,
                 model_parameters={
                     "temperature": temperature,
-                    "max_tokens": max_tokens or settings.llm_output_max_tokens,
+                    "max_tokens": requested_max_tokens,
+                    "enable_thinking": False,
                     "vision": True,
                 },
             )
-            body: dict[str, Any] = {
-                "messages": guarded_messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens or settings.llm_output_max_tokens,
-            }
+            body = self._build_chat_request_body(
+                guarded_messages,
+                temperature=temperature,
+                max_tokens=requested_max_tokens,
+            )
             resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()

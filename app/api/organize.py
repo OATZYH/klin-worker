@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import Category, CategoryScore, File, FileAnalysis
+from app.db.models import Category, File, FileAnalysis
 from app.core.ai_exceptions import (
     AiCapabilityUnavailableError,
     format_ai_capability_errors,
@@ -48,7 +48,6 @@ from app.observability.tracing import get_current_trace_id, observe, update_curr
 from app.models.response import (
     ApplyOrganizeDecisionResponse,
     CategoryScoreResponse,
-    FileAnalysisResponse,
     OrganizeFileResult,
     OrganizeResponse,
 )
@@ -60,6 +59,7 @@ from app.services.ai.rag_service import RagService
 from app.services.ai.rename_service import RenameService
 from app.services.files.docling_parser import get_docling_profile_fingerprint
 from app.services.files.scanner_service import ScannerService
+from app.services.organize_telemetry import OrganizeTelemetry
 from app.services.ai.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
 from app.services.lock_settings_service import LockSettingsService
@@ -103,7 +103,7 @@ def _elapsed_ms(started_at: float) -> float:
 def _build_locked_result(filepath: str, reason: str) -> OrganizeFileResult:
     return OrganizeFileResult(
         file_id=f"locked::{hashlib.md5(filepath.encode()).hexdigest()}",
-        analysis=FileAnalysisResponse(suggested_names=[]),
+        suggested_names=[],
         categories=[],
         error=f"Skipped locked file: {reason}",
     )
@@ -130,29 +130,6 @@ def _build_category_responses(
     ]
 
 
-def _build_history_metadata(
-    *,
-    suggested_names: list[str],
-    scores: list[dict[str, Any]],
-    pipeline: dict[str, str | bool | None],
-    timings: dict[str, float],
-) -> dict[str, Any]:
-    """Build a stable history payload for all organize event variants."""
-    return {
-        "suggested_names": suggested_names,
-        "all_scores": [
-            {
-                "category_id": str(score["category_id"]),
-                "name": str(score["name"]),
-                "score": float(score["score"]),
-            }
-            for score in scores
-        ],
-        "pipeline": dict(pipeline),
-        "timings": dict(timings),
-    }
-
-
 async def _log_pipeline_issue(
     *,
     db: AsyncSession,
@@ -163,19 +140,14 @@ async def _log_pipeline_issue(
     filepath: str,
     file_id: str | None = None,
     error: str | None = None,
-    pipeline: dict[str, str | bool | None] | None = None,
-    timings: dict[str, float] | None = None,
+    telemetry: OrganizeTelemetry | None = None,
 ) -> None:
     """Persist an operational warning/error for troubleshooting."""
-    context: dict[str, Any] = {"filepath": filepath}
-    if file_id:
-        context["file_id"] = file_id
-    if error:
-        context["error"] = error
-    if pipeline:
-        context["pipeline"] = dict(pipeline)
-    if timings:
-        context["timings"] = dict(timings)
+    context = (
+        telemetry.build_log_context(filepath=filepath, file_id=file_id, error=error)
+        if telemetry is not None
+        else {"filepath": filepath}
+    )
 
     await system_log_svc.log(
         db=db,
@@ -219,8 +191,7 @@ async def _build_ai_unavailable_result(
     filepath: str,
     file_id: str,
     suggested_names: list[str],
-    pipeline: dict[str, str | bool | None],
-    timings: dict[str, float],
+    telemetry: OrganizeTelemetry,
     total_started_at: float,
     ai_errors: list[AiCapabilityUnavailableError],
     event_type: str,
@@ -228,13 +199,13 @@ async def _build_ai_unavailable_result(
 ) -> OrganizeFileResult:
     """Create a consistent per-file AI-unavailable organize result."""
     detail = format_ai_capability_errors(ai_errors)
-    pipeline["ai_status"] = "unavailable"
+    telemetry.ai_status = "unavailable"
     if any(error.capability == "rag" for error in ai_errors):
-        pipeline["rag_status"] = "not_ready"
-    elif pipeline.get("rag_status") is None:
-        pipeline["rag_status"] = "skipped_ai_unavailable"
+        telemetry.rag_status = "not_ready"
+    elif telemetry.rag_status is None:
+        telemetry.rag_status = "skipped_ai_unavailable"
 
-    timings["total_ms"] = _elapsed_ms(total_started_at)
+    telemetry.record_total(_elapsed_ms(total_started_at))
 
     await _log_pipeline_issue(
         db=db,
@@ -245,18 +216,17 @@ async def _build_ai_unavailable_result(
         filepath=filepath,
         file_id=file_id,
         error=detail,
-        pipeline=pipeline,
-        timings=timings,
+        telemetry=telemetry,
     )
     logger.warning(
         "Organize AI unavailable | file=%s | error=%s | timings=%s",
         filepath,
         detail,
-        timings,
+        telemetry.timings_dict(),
     )
     return OrganizeFileResult(
         file_id=file_id,
-        analysis=FileAnalysisResponse(suggested_names=suggested_names),
+        suggested_names=suggested_names,
         categories=[],
         error=detail,
     )
@@ -573,23 +543,15 @@ async def _process_single_file_inner(
         input={"filepath": filepath, "force": force},
         metadata={"trace_id": get_current_trace_id()},
     )
-    timings: dict[str, float] = {}
-    pipeline: dict[str, str | bool | None] = {
-        "rag_ready": rag.is_ready,
-        "ai_status": None,
-        "is_new_file": False,
-        "file_changed": False,
-        "rag_status": None,
-        "cached": False,
-    }
+    telemetry = OrganizeTelemetry(rag_ready=rag.is_ready)
 
     # ── Step 1: Scan ─────────────────────────────────────────────────
     step_started_at = time.perf_counter()
     scan = await scanner.scan(filepath)
-    timings["scan_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("scan", _elapsed_ms(step_started_at))
 
     if scan.error:
-        timings["total_ms"] = _elapsed_ms(total_started_at)
+        telemetry.record_total(_elapsed_ms(total_started_at))
         await _log_pipeline_issue(
             db=db,
             system_log_svc=system_log_svc,
@@ -598,18 +560,17 @@ async def _process_single_file_inner(
             message="File scan failed during organize pipeline.",
             filepath=filepath,
             error=scan.error,
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
         )
         logger.warning(
             "Organize failed | file=%s | error=%s | timings=%s",
             filepath,
             scan.error,
-            timings,
+            telemetry.timings_dict(),
         )
         return OrganizeFileResult(
             file_id="",
-            analysis=FileAnalysisResponse(),
+            suggested_names=[],
             categories=[],
             error=scan.error,
         )
@@ -639,9 +600,9 @@ async def _process_single_file_inner(
 
     await db.flush()  # assign file_record.id
     file_changed = is_new_file or previous_hash != scan.sha256
-    pipeline["is_new_file"] = is_new_file
-    pipeline["file_changed"] = file_changed
-    timings["file_upsert_ms"] = _elapsed_ms(step_started_at)
+    telemetry.is_new_file = is_new_file
+    telemetry.file_changed = file_changed
+    telemetry.record_timing("file_upsert", _elapsed_ms(step_started_at))
 
     # ── Step 3: Cache check — instant return for unchanged files ─────
     # Three outcomes:
@@ -664,9 +625,9 @@ async def _process_single_file_inner(
     # ── 3a: Full cache hit ────────────────────────────────────────────
     if not file_changed and analysis_fingerprint_match and not force:
         step_started_at = time.perf_counter()
-        pipeline["cached"] = True
-        pipeline["cache_reason"] = "full_hit"
-        pipeline["rag_status"] = "skipped_cached"
+        telemetry.cached = True
+        telemetry.cache_reason = "full_hit"
+        telemetry.rag_status = "skipped_cached"
 
         cached_analysis = file_record.analysis
         assert cached_analysis is not None
@@ -695,7 +656,7 @@ async def _process_single_file_inner(
         else:
             score_dicts = []
 
-        timings["cache_lookup_ms"] = _elapsed_ms(step_started_at)
+        telemetry.record_timing("cache_lookup", _elapsed_ms(step_started_at))
 
         cached_names: list[str] = []
         if cached_analysis.suggested_names:
@@ -705,40 +666,43 @@ async def _process_single_file_inner(
                 cached_names = [cached_analysis.suggested_names]
 
         step_started_at = time.perf_counter()
-        history_metadata = _build_history_metadata(
+        history_metadata = telemetry.build_history_metadata(
             suggested_names=cached_names,
             scores=score_dicts,
-            pipeline=pipeline,
-            timings={},
         )
         history_entry = await history_svc.log(
             db=db, file_id=file_record.id, action="organized_cached", metadata=history_metadata
         )
-        timings["history_log_ms"] = _elapsed_ms(step_started_at)
-        timings["total_ms"] = _elapsed_ms(total_started_at)
-        history_metadata["timings"] = timings
+        telemetry.record_timing("history_log", _elapsed_ms(step_started_at))
+        telemetry.record_total(_elapsed_ms(total_started_at))
+        history_metadata = telemetry.build_history_metadata(
+            suggested_names=cached_names,
+            scores=score_dicts,
+        )
         history_entry.metadata_json = json.dumps(history_metadata)
         await db.flush()
 
         logger.info(
-            "Organize cached (full hit) | file=%s | timings=%s", scan.original_path, timings
+            "Organize cached (full hit) | file=%s | timings=%s",
+            scan.original_path,
+            telemetry.timings_dict(),
         )
         update_current_span(
-            metadata={"cache_reason": "full_hit", "file_changed": file_changed},
+            metadata=telemetry.build_trace_metadata(),
             output={"category_count": len(category_responses), "cached": True},
         )
         return OrganizeFileResult(
             file_id=file_record.id,
-            analysis=FileAnalysisResponse(suggested_names=cached_names),
+            suggested_names=cached_names,
             categories=category_responses,
         )
 
     # ── 3b: Partial cache — file unchanged but categories changed ─────
     if not file_changed and has_cached_analysis and not force:
         step_started_at = time.perf_counter()
-        pipeline["cached"] = "partial"
-        pipeline["cache_reason"] = "analysis_inputs_changed"
-        pipeline["rag_status"] = "skipped_unchanged"
+        telemetry.cached = "partial"
+        telemetry.cache_reason = "analysis_inputs_changed"
+        telemetry.rag_status = "skipped_unchanged"
 
         cached_analysis = file_record.analysis
         assert cached_analysis is not None
@@ -752,7 +716,7 @@ async def _process_single_file_inner(
 
         ai_check_started_at = time.perf_counter()
         ai_errors = await _collect_organize_ai_errors(rag)
-        timings["ai_check_ms"] = _elapsed_ms(ai_check_started_at)
+        telemetry.record_timing("ai_check", _elapsed_ms(ai_check_started_at))
         if ai_errors:
             return await _build_ai_unavailable_result(
                 db=db,
@@ -760,14 +724,13 @@ async def _process_single_file_inner(
                 filepath=scan.original_path,
                 file_id=file_record.id,
                 suggested_names=cached_names,
-                pipeline=pipeline,
-                timings=timings,
+                telemetry=telemetry,
                 total_started_at=total_started_at,
                 ai_errors=ai_errors,
                 event_type="organize_reclassify_ai_unavailable",
                 message="AI capabilities unavailable during organize re-classification.",
             )
-        pipeline["ai_status"] = "ready"
+        telemetry.ai_status = "ready"
 
         # Re-classify only — reuse cached summary, no LLM summary call
         scores: list[dict] = []
@@ -786,8 +749,7 @@ async def _process_single_file_inner(
                 filepath=scan.original_path,
                 file_id=file_record.id,
                 suggested_names=cached_names,
-                pipeline=pipeline,
-                timings=timings,
+                telemetry=telemetry,
                 total_started_at=total_started_at,
                 ai_errors=[exc],
                 event_type="organize_reclassify_ai_unavailable",
@@ -804,10 +766,9 @@ async def _process_single_file_inner(
                 filepath=scan.original_path,
                 file_id=file_record.id,
                 error=str(exc),
-                pipeline=pipeline,
-                timings=timings,
+                telemetry=telemetry,
             )
-        timings["reclassify_ms"] = _elapsed_ms(step_started_at)
+        telemetry.record_timing("reclassify", _elapsed_ms(step_started_at))
 
         # Persist updated categories_hash
         cached_analysis.categories_hash = current_analysis_fingerprint
@@ -816,11 +777,9 @@ async def _process_single_file_inner(
         category_responses = _build_category_responses(scores)
 
         step_started_at = time.perf_counter()
-        history_metadata = _build_history_metadata(
+        history_metadata = telemetry.build_history_metadata(
             suggested_names=cached_names,
             scores=scores,
-            pipeline=pipeline,
-            timings={},
         )
         history_entry = await history_svc.log(
             db=db,
@@ -828,31 +787,34 @@ async def _process_single_file_inner(
             action="organized_reclassified",
             metadata=history_metadata,
         )
-        timings["history_log_ms"] = _elapsed_ms(step_started_at)
-        timings["total_ms"] = _elapsed_ms(total_started_at)
-        history_metadata["timings"] = timings
+        telemetry.record_timing("history_log", _elapsed_ms(step_started_at))
+        telemetry.record_total(_elapsed_ms(total_started_at))
+        history_metadata = telemetry.build_history_metadata(
+            suggested_names=cached_names,
+            scores=scores,
+        )
         history_entry.metadata_json = json.dumps(history_metadata)
         await db.flush()
 
         logger.info(
             "Organize partial cache (re-classified) | file=%s | timings=%s",
             scan.original_path,
-            timings,
+            telemetry.timings_dict(),
         )
         update_current_span(
-            metadata={"cache_reason": "reclassified", "file_changed": file_changed},
+            metadata=telemetry.build_trace_metadata(),
             output={"category_count": len(category_responses), "cached": True},
         )
         return OrganizeFileResult(
             file_id=file_record.id,
-            analysis=FileAnalysisResponse(suggested_names=cached_names),
+            suggested_names=cached_names,
             categories=category_responses,
         )
 
     # ── Step 4: Live AI capability check ─────────────────────────────
     step_started_at = time.perf_counter()
     ai_errors = await _collect_organize_ai_errors(rag)
-    timings["ai_check_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("ai_check", _elapsed_ms(step_started_at))
     if ai_errors:
         return await _build_ai_unavailable_result(
             db=db,
@@ -860,29 +822,28 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             suggested_names=[],
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
             total_started_at=total_started_at,
             ai_errors=ai_errors,
             event_type="organize_ai_unavailable",
             message="AI capabilities unavailable during organize pipeline.",
         )
-    pipeline["ai_status"] = "ready"
+    telemetry.ai_status = "ready"
 
     # ── Step 5: Enqueue background RAG ingestion (non-blocking) ──────
     step_started_at = time.perf_counter()
     prepared_ingest = None
     if not rag.is_ready:
-        pipeline["rag_status"] = "not_ready"
+        telemetry.rag_status = "not_ready"
     elif not file_changed and not force:
-        pipeline["rag_status"] = "skipped_unchanged"
+        telemetry.rag_status = "skipped_unchanged"
     else:
-        prepared_ingest = await ingest.enqueue(
+        prepared_ingest = await ingest.prepare(
             filepath=scan.original_path,
             trace_id=get_current_trace_id(),
         )
-        pipeline["rag_status"] = prepared_ingest.ingest_status
-    timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
+        telemetry.rag_status = prepared_ingest.ingest_status
+    telemetry.record_timing("rag_enqueue", _elapsed_ms(step_started_at))
 
     # ── Step 6: Generate summary from fast parsed text ───────────────
     step_started_at = time.perf_counter()
@@ -900,8 +861,7 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             suggested_names=[],
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
             total_started_at=total_started_at,
             ai_errors=[exc],
             event_type="organize_summary_ai_unavailable",
@@ -918,10 +878,9 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
         )
-    timings["summary_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("summary", _elapsed_ms(step_started_at))
 
     # ── Step 7: Generate rename suggestion ───────────────────────────
     step_started_at = time.perf_counter()
@@ -939,8 +898,7 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             suggested_names=[],
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
             total_started_at=total_started_at,
             ai_errors=[exc],
             event_type="organize_rename_ai_unavailable",
@@ -957,10 +915,9 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
         )
-    timings["rename_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("rename", _elapsed_ms(step_started_at))
 
     # ── Step 8: Store analysis (robust upsert) ──────────────────────
     step_started_at = time.perf_counter()
@@ -981,7 +938,7 @@ async def _process_single_file_inner(
         db.add(analysis)
 
     await db.flush()
-    timings["analysis_save_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("analysis_save", _elapsed_ms(step_started_at))
 
     # ── Step 9: Classify with summary-enriched embedding ─────────────
     step_started_at = time.perf_counter()
@@ -1004,8 +961,7 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             suggested_names=suggested_names,
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
             total_started_at=total_started_at,
             ai_errors=[exc],
             event_type="organize_classify_ai_unavailable",
@@ -1022,19 +978,17 @@ async def _process_single_file_inner(
             filepath=scan.original_path,
             file_id=file_record.id,
             error=str(exc),
-            pipeline=pipeline,
-            timings=timings,
+            telemetry=telemetry,
         )
-    timings["classify_ms"] = _elapsed_ms(step_started_at)
+    telemetry.record_timing("classify", _elapsed_ms(step_started_at))
 
     category_responses = _build_category_responses(scores)
 
     # ── Step 10: Log history ─────────────────────────────────────────
-    history_metadata = _build_history_metadata(
+    telemetry.cache_reason = "full_run"
+    history_metadata = telemetry.build_history_metadata(
         suggested_names=suggested_names,
         scores=scores,
-        pipeline=pipeline,
-        timings={},
     )
     step_started_at = time.perf_counter()
     history_entry = await history_svc.log(
@@ -1043,9 +997,12 @@ async def _process_single_file_inner(
         action="organized",
         metadata=history_metadata,
     )
-    timings["history_log_ms"] = _elapsed_ms(step_started_at)
-    timings["total_ms"] = _elapsed_ms(total_started_at)
-    history_metadata["timings"] = timings
+    telemetry.record_timing("history_log", _elapsed_ms(step_started_at))
+    telemetry.record_total(_elapsed_ms(total_started_at))
+    history_metadata = telemetry.build_history_metadata(
+        suggested_names=suggested_names,
+        scores=scores,
+    )
     history_entry.metadata_json = json.dumps(history_metadata)
     await db.flush()
 
@@ -1054,23 +1011,16 @@ async def _process_single_file_inner(
         scan.original_path,
         is_new_file,
         file_changed,
-        pipeline["rag_status"],
-        timings,
+        telemetry.rag_status,
+        telemetry.timings_dict(),
     )
     update_current_span(
-        metadata={
-            "cache_reason": "full_run",
-            "is_new_file": is_new_file,
-            "file_changed": file_changed,
-            "rag_status": pipeline["rag_status"],
-        },
+        metadata=telemetry.build_trace_metadata(),
         output={"category_count": len(category_responses), "suggestion_count": len(suggested_names)},
     )
 
     return OrganizeFileResult(
         file_id=file_record.id,
-        analysis=FileAnalysisResponse(
-            suggested_names=suggested_names,
-        ),
+        suggested_names=suggested_names,
         categories=category_responses,
     )

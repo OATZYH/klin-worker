@@ -290,6 +290,9 @@ def _feature_tag(path: str) -> str:
 @app.middleware("http")
 async def langfuse_request_middleware(request: Request, call_next):
     path = request.url.path
+    if path == "/health":
+        return await call_next(request)
+
     method = request.method.upper()
     trace_name = f"{method} {path}"
     feature = _feature_tag(path)

@@ -1,0 +1,22 @@
+meta {
+  name: Summarize Files (1)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/api/summary
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+  //   "file_path": "/Users/sarun/Work/Senior/klin-worker/klin-test/data/หลักสูตรการแพทย์แผนจีนบัณฑิตCM67.pdf",
+    "file_path":"/Users/sarun/Work/Senior/klin-worker/klin-test/data/images.jpg"
+  }
+}
