@@ -44,7 +44,7 @@ def _resolve_llm_max_tokens(kwargs: dict[str, Any]) -> int:
         resolved = _coerce_positive_int(kwargs.get(key))
         if resolved is not None:
             return resolved
-    return settings.rag_llm_max_tokens
+    return settings.rag_output_max_tokens
 
 
 def _resolve_llm_temperature(kwargs: dict[str, Any]) -> float:
@@ -110,7 +110,7 @@ class RagService:
             # Embedding function configured for llama-server
             embedding_func = EmbeddingFunc(
                 embedding_dim=settings.embedding_dim,
-                max_token_size=settings.max_token_size,
+                max_token_size=settings.rag_embedding_input_max_tokens,
                 func=_embed,
             )
 

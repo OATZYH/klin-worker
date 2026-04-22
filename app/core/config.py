@@ -134,18 +134,23 @@ class Settings(BaseSettings):
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
-    # ── llama-server (out-of-process, managed by Tauri) ────────────────
+    # ── llama-server / client defaults ─────────────────────────────────
     llama_server_url: str = "http://127.0.0.1:8080/"
     llama_embedding_server_url: str = "http://127.0.0.1:8081/"
-    embedding_dim_size: int = 2048  # must match model served by llama-server
-    max_token_limit: int = 4096  # used for RAG chunking
+    embedding_dim_size: int = 768  # must match model served by llama-server
+    llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
+    llm_output_max_tokens: int = 4096
+    rag_embedding_input_max_tokens: int = 8192 # nomic full context
 
-    # ── Organize pipeline tuning ────────────────────────────────────────
-    summary_rag_top_k: int = 2
-    summary_context_max_chars: int = 1200
-    summary_max_tokens: int = 64
-    rename_max_tokens: int = 48
-    rag_llm_max_tokens: int = 256
+    # ── Summary service tuning ──────────────────────────────────────────
+    summary_retrieval_top_k: int = 2
+    summary_output_max_tokens: int = 2048
+
+    # ── Rename service tuning ───────────────────────────────────────────
+    rename_output_max_tokens: int = 48
+
+    # ── RAG service tuning ──────────────────────────────────────────────
+    rag_output_max_tokens: int = 512
     docling_parser_max_workers: int = 2
     docling_fast_do_ocr: bool = False
     docling_fast_do_table_structure: bool = False
@@ -193,10 +198,6 @@ class Settings(BaseSettings):
     @property
     def embedding_dim(self) -> int:
         return self.embedding_dim_size
-
-    @property
-    def max_token_size(self) -> int:
-        return self.max_token_limit
 
     @property
     def langfuse_environment(self) -> str:

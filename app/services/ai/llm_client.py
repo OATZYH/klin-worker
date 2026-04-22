@@ -16,6 +16,7 @@ import json
 import logging
 import queue
 import threading
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Iterator
 
@@ -52,6 +53,34 @@ class LlmClient:
         self._chat_server_reachable: bool = False
         self._embed_server_reachable: bool = False
         self._model_id: str = ""
+
+    @staticmethod
+    def _truncate_text_value(value: str, max_chars: int) -> str:
+        """Apply a coarse character guard to reduce worst-case prompt size."""
+        if max_chars <= 0 or len(value) <= max_chars:
+            return value
+        return value[:max_chars]
+
+    def _apply_input_char_guard(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Trim text-bearing message content before sending requests to llama-server."""
+        max_chars = settings.llm_input_max_chars
+        if max_chars <= 0:
+            return messages
+
+        guarded_messages = deepcopy(messages)
+        for message in guarded_messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = self._truncate_text_value(content, max_chars)
+                continue
+
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_value = part.get("text")
+                        if isinstance(text_value, str):
+                            part["text"] = self._truncate_text_value(text_value, max_chars)
+        return guarded_messages
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -205,18 +234,19 @@ class LlmClient:
         Returns the assistant message content as a plain string.
         """
         self._assert_chat_client_started()
+        guarded_messages = self._apply_input_char_guard(messages)
 
         body: dict[str, Any] = {
-            "messages": messages,
+            "messages": guarded_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or settings.max_token_size,
+            "max_tokens": max_tokens or settings.llm_output_max_tokens,
         }
         update_current_generation(
-            input={"messages": sanitize_messages(messages)},
+            input={"messages": sanitize_messages(guarded_messages)},
             model=self._model_id or None,
             model_parameters={
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.max_token_size,
+                "max_tokens": max_tokens or settings.llm_output_max_tokens,
             },
         )
 
@@ -277,6 +307,8 @@ class LlmClient:
                 break
             if isinstance(item, Exception):
                 raise item
+            if not isinstance(item, str):
+                continue
             yield item
 
     async def achat_stream(
@@ -288,11 +320,12 @@ class LlmClient:
     ) -> AsyncIterator[str]:
         """Stream chat completion tokens from llama-server."""
         self._assert_chat_client_started()
+        guarded_messages = self._apply_input_char_guard(messages)
 
         body: dict[str, Any] = {
-            "messages": messages,
+            "messages": guarded_messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or settings.max_token_size,
+            "max_tokens": max_tokens or settings.llm_output_max_tokens,
             "stream": True,
         }
         aggregated: list[str] = []
@@ -301,11 +334,11 @@ class LlmClient:
         with start_as_current_observation(
             name="llm.chat_stream",
             as_type="generation",
-            input={"messages": sanitize_messages(messages)},
+            input={"messages": sanitize_messages(guarded_messages)},
             model=self._model_id or None,
             model_parameters={
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.max_token_size,
+                "max_tokens": max_tokens or settings.llm_output_max_tokens,
                 "stream": True,
             },
         ):
@@ -395,19 +428,20 @@ class LlmClient:
             )
 
         try:
+            guarded_messages = self._apply_input_char_guard(messages)
             update_current_generation(
-                input={"messages": sanitize_messages(messages)},
+                input={"messages": sanitize_messages(guarded_messages)},
                 model=self._model_id or None,
                 model_parameters={
                     "temperature": temperature,
-                    "max_tokens": max_tokens or settings.max_token_size,
+                    "max_tokens": max_tokens or settings.llm_output_max_tokens,
                     "vision": True,
                 },
             )
             body: dict[str, Any] = {
-                "messages": messages,
+                "messages": guarded_messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens or settings.max_token_size,
+                "max_tokens": max_tokens or settings.llm_output_max_tokens,
             }
             resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()

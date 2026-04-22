@@ -54,7 +54,7 @@ class SummaryService:
             content = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=settings.summary_max_tokens,
+                max_tokens=settings.summary_output_max_tokens,
             )
             update_current_span(output={"has_summary": bool(content), "mode": "text"})
             return content.strip() or None
@@ -114,7 +114,7 @@ class SummaryService:
             content = await llm_client.achat_with_vision(
                 messages,
                 temperature=0.3,
-                max_tokens=settings.summary_max_tokens,
+                max_tokens=settings.summary_output_max_tokens,
             )
             update_current_generation(output={"has_summary": bool(content), "mode": "vision"})
             return content.strip() or None
@@ -138,7 +138,7 @@ class SummaryService:
             content = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
-                max_tokens=settings.summary_max_tokens,
+                max_tokens=settings.summary_output_max_tokens,
             )
             return content.strip() or None
         except AiCapabilityUnavailableError:
@@ -151,7 +151,7 @@ class SummaryService:
     def _get_text_context(path: Path, extracted_text: str | None) -> str:
         """Resolve summary context from fast parse output or filename fallback."""
         if extracted_text and len(extracted_text) >= _MIN_EXTRACTED_TEXT_CHARS:
-            return extracted_text[: settings.summary_context_max_chars]
+            return extracted_text
 
         logger.warning("No extracted text for %s — falling back to filename", path.name)
         return f"Filename: {path.name}, Extension: {path.suffix}"

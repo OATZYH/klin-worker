@@ -115,7 +115,13 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 | `KLIN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080/` | OpenAI-compatible `llama-server` base URL |
 | `KLIN_LLAMA_EMBEDDING_SERVER_URL` | `http://127.0.0.1:8081/` | OpenAI-compatible embedding `llama-server` base URL |
 | `KLIN_EMBEDDING_DIM_SIZE` | `2048` | Embedding vector dimension expected from the served model |
-| `KLIN_MAX_TOKEN_LIMIT` | `4096` | Max token budget used by worker generation / chunking |
+| `KLIN_LLM_INPUT_MAX_CHARS` | `1200` | Coarse character guard applied to text prompt content before llama-server requests |
+| `KLIN_LLM_OUTPUT_MAX_TOKENS` | `4096` | Default output token budget when a caller does not pass `max_tokens` |
+| `KLIN_RAG_EMBEDDING_INPUT_MAX_TOKENS` | `4096` | Input token budget for RAG embedding and chunking internals |
+| `KLIN_SUMMARY_RETRIEVAL_TOP_K` | `2` | Retrieval breadth used by the summary pipeline |
+| `KLIN_SUMMARY_OUTPUT_MAX_TOKENS` | `64` | Max output tokens for per-file summary generation |
+| `KLIN_RENAME_OUTPUT_MAX_TOKENS` | `48` | Max output tokens for rename suggestion generation |
+| `KLIN_RAG_OUTPUT_MAX_TOKENS` | `256` | Default output token budget for internal RAG generation |
 | `KLIN_DEBUG` | `false` | Enable debug logging |
 | `KLIN_RAG_WORKING_DIR` | `.storage/rag_storage` in source-run dev | RAG-Anything storage path |
 | `KLIN_DATABASE_PATH` | `.storage/klin.db` in source-run dev | SQLite database path |

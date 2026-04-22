@@ -49,7 +49,7 @@ class RenameService:
             raw = await llm_client.achat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.5,
-                max_tokens=settings.rename_max_tokens,
+                max_tokens=settings.rename_output_max_tokens,
             )
             names: list[str] = []
             for line in raw.strip().splitlines():
