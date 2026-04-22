@@ -44,7 +44,7 @@ from app.api.settings.store import (
     parse_datetime_setting,
     upsert_setting_value,
 )
-from app.services.categories.classification_service import ClassificationService
+from app.services.organize.classification_service import ClassificationService
 from app.services.categories.seed_service import generate_missing_embeddings, seed_default_categories
 
 logger = logging.getLogger(__name__)

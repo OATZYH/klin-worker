@@ -19,9 +19,9 @@ from app.core.ai_exceptions import (
 )
 from app.db.session import get_db
 from app.observability.tracing import observe, update_current_span
-from app.services.background_ingest import BackgroundIngestWorker
-from app.services.ai.summary_service import SummaryService
-from app.services.summary_workflow_service import SummaryWorkflowService
+from app.services.organize.background_ingest import BackgroundIngestWorker
+from app.services.summary.summary_service import SummaryService
+from app.services.summary.summary_workflow_service import SummaryWorkflowService
 
 logger = logging.getLogger(__name__)
 

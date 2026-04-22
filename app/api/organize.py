@@ -51,18 +51,18 @@ from app.models.response import (
     OrganizeFileResult,
     OrganizeResponse,
 )
-from app.services.background_ingest import BackgroundIngestWorker
-from app.services.categories.classification_service import ClassificationService
+from app.services.organize.background_ingest import BackgroundIngestWorker
+from app.services.organize.classification_service import ClassificationService
 from app.services.history_service import HistoryService
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
-from app.services.ai.rename_service import RenameService
+from app.services.organize.rename_service import RenameService
 from app.services.files.docling_parser import get_docling_profile_fingerprint
-from app.services.files.scanner_service import ScannerService
-from app.services.organize_telemetry import OrganizeTelemetry
-from app.services.ai.summary_service import SummaryService
+from app.services.organize.scanner_service import ScannerService
+from app.services.organize.organize_telemetry import OrganizeTelemetry
+from app.services.summary.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
-from app.services.lock_settings_service import LockSettingsService
+from app.services.settings.lock_settings_service import LockSettingsService
 
 logger = logging.getLogger(__name__)
 

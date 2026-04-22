@@ -12,9 +12,9 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import File, FileAnalysis
 from app.observability.tracing import get_current_trace_id, observe, update_current_span
-from app.services.background_ingest import BackgroundIngestWorker
+from app.services.organize.background_ingest import BackgroundIngestWorker
 from app.services.ai.llm_client import llm_client
-from app.services.ai.summary_service import SummaryService
+from app.services.summary.summary_service import SummaryService
 
 logger = logging.getLogger(__name__)
 

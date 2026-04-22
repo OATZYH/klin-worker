@@ -47,8 +47,8 @@ from app.observability.tracing import (
     start_as_current_observation,
     update_current_span,
 )
-from app.services.background_ingest import BackgroundIngestWorker
-from app.services.categories.classification_service import ClassificationService
+from app.services.organize.background_ingest import BackgroundIngestWorker
+from app.services.organize.classification_service import ClassificationService
 from app.services.files.docling_parser import build_docling_parser
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
