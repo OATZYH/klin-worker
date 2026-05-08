@@ -105,6 +105,8 @@ class Settings(BaseSettings):
         "http://localhost:1420",  # Tauri dev default
         "http://localhost:5173",  # Vite fallback
         "tauri://localhost",  # Tauri production
+        "http://tauri.localhost",  # Tauri production (http scheme)
+        "https://tauri.localhost",  # Tauri production (https scheme)
     ]
 
     # ── SQLite ───────────────────────────────────────────────────────────
