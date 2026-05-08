@@ -98,7 +98,8 @@ History list/read and note history creation.
 
 ### `app/api/search.py`
 
-Current mock search endpoint used by UI integration.
+Hybrid search endpoint over organize-known files, with SQLite basename matches
+ranked before LightRAG semantic references.
 
 ## Service Layer
 

@@ -93,7 +93,7 @@ app/
     organize.py              /api/organize + /api/organize/apply
     summary.py               /api/summary + /api/summary/stream
     history.py               /api/history endpoints
-    search.py                /api/search/files (mock)
+    search.py                /api/search/files hybrid SQLite + RAG search
     settings/
       categories.py          category CRUD + batch
       base_path.py           default base path + onboarding
@@ -449,7 +449,7 @@ Current mounted endpoints:
 - `POST /api/organize/apply`
 - `POST /api/summary`
 - `POST /api/summary/stream`
-- `POST /api/search/files` (mock search)
+- `POST /api/search/files`
 - `GET /api/history`
 - `GET /api/history/file/{file_id}`
 - `POST /api/history/note`
@@ -495,7 +495,8 @@ Path resolution:
 Implemented but not fully automated yet:
 
 - Watched-folder scheduler persistence exists; continuous scheduler execution path is not yet active.
-- Search endpoint currently returns mock data.
+- Search covers files already known to organize, combining SQLite basename search with
+  RAG semantic references from LightRAG.
 
 Potential roadmap areas already represented in code/config:
 
