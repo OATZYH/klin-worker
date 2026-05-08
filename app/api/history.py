@@ -20,7 +20,6 @@ from app.db.models import File, HistoryLog
 from app.db.session import get_db
 from app.models.request import NoteHistoryCreateRequest
 from app.models.response import (
-    HistoryListResponse,
     HistoryLogResponse,
     SelectedCategoryScoreResponse,
 )
@@ -30,7 +29,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
-USER_ACTIONS = ["renamed", "moved", "renamed_moved", "note"]
+USER_ACTIONS = [
+    "renamed",
+    "moved",
+    "renamed_moved",
+    "calendar_event_approved",
+    "calendar_event_rejected",
+]
 
 
 MOCK_HISTORY_ITEMS: list[dict[str, Any]] = [
@@ -86,14 +91,46 @@ def _get_history() -> HistoryService:
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
-    """Convert a raw HistoryLog row into a V3 HistoryLogResponse."""
+async def _enrich_log(log: HistoryLog, db: AsyncSession) -> dict[str, Any]:
+    """Convert a raw HistoryLog row into a UI-ready dict."""
     metadata: dict = {}
     if log.metadata_json:
         try:
             metadata = json.loads(log.metadata_json)
         except (json.JSONDecodeError, TypeError):
             pass
+
+    if log.action in ("calendar_event_approved", "calendar_event_rejected"):
+        is_approved = log.action == "calendar_event_approved"
+        meeting_title = str(metadata.get("meeting_title") or "") or "Calendar event"
+        source_file_name = str(metadata.get("source_file_name") or "")
+        attendees_raw = metadata.get("attendees")
+        attendees = (
+            [str(item) for item in attendees_raw if str(item).strip()]
+            if isinstance(attendees_raw, list)
+            else None
+        )
+        return {
+            "id": log.id,
+            "type": "calendar",
+            "title": meeting_title,
+            "subtitle": "Added to Google Calendar" if is_approved else "Dismissed",
+            "timestamp": log.created_at.isoformat() if log.created_at else datetime.now(timezone.utc).isoformat(),
+            "action": log.action,
+            "foundInFile": bool(metadata.get("found_in_file", True)),
+            "sourceFileName": source_file_name,
+            "meetingTitle": meeting_title,
+            "meetingTime": str(metadata.get("meeting_time") or ""),
+            "meetingLocation": str(metadata.get("meeting_location") or ""),
+            "details": str(metadata.get("details") or ""),
+            "actionLabel": str(metadata.get("action_label") or ("Open in Google Calendar" if is_approved else "Dismissed")),
+            "attendees": attendees,
+            "meetLink": str(metadata.get("meet_link") or "") or None,
+            "organizer": str(metadata.get("organizer") or "") or None,
+            "timeZone": str(metadata.get("time_zone") or "") or None,
+            "status": str(metadata.get("status") or ("approved" if is_approved else "rejected")),
+            "calendarId": None,
+        }
 
     category: SelectedCategoryScoreResponse | None = None
     raw_category = metadata.get("selected_category") or metadata.get("category")
@@ -150,7 +187,7 @@ async def _enrich_log(log: HistoryLog, db: AsyncSession) -> HistoryLogResponse:
         source_files=[str(item) for item in source_files] if source_files else None,
         category_name=category_name,
         created_at=log.created_at,
-    )
+    ).model_dump(mode="json")
 
 
 async def _get_or_create_note_file(db: AsyncSession, destination_path: str) -> File:
@@ -179,7 +216,7 @@ async def _get_or_create_note_file(db: AsyncSession, destination_path: str) -> F
 # ── Routes ───────────────────────────────────────────────────────────────
 
 
-@router.get("", response_model=HistoryListResponse)
+@router.get("")
 async def list_history(
     limit: int = Query(default=20, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -187,7 +224,7 @@ async def list_history(
     search: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     history_svc: HistoryService = Depends(_get_history),
-) -> HistoryListResponse:
+) -> dict[str, Any]:
     """Get paginated recent history entries, optionally filtered by action and search."""
     logs, has_more = await history_svc.get_recent_page(
         db,
@@ -198,28 +235,28 @@ async def list_history(
         search=search,
     )
 
-    results = []
+    results: list[dict[str, Any]] = []
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results, limit=limit, offset=offset, has_more=has_more)
+    return {"results": results, "limit": limit, "offset": offset, "has_more": has_more}
 
 
-@router.get("/file/{file_id}", response_model=HistoryListResponse)
+@router.get("/file/{file_id}")
 async def get_file_history(
     file_id: str,
     limit: int = Query(default=50, le=200),
     db: AsyncSession = Depends(get_db),
     history_svc: HistoryService = Depends(_get_history),
-) -> HistoryListResponse:
+) -> dict[str, Any]:
     """Get history entries for a specific file."""
     logs = await history_svc.get_by_file(db, file_id=file_id, limit=limit, actions=USER_ACTIONS)
 
-    results = []
+    results: list[dict[str, Any]] = []
     for log in logs:
         results.append(await _enrich_log(log, db))
 
-    return HistoryListResponse(results=results, limit=limit, offset=0, has_more=False)
+    return {"results": results, "limit": limit, "offset": 0, "has_more": False}
 
 
 @router.post("/note")

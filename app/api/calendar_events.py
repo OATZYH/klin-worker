@@ -157,9 +157,42 @@ async def update_status(
         row.google_event_id = body.google_event_id
     await db.flush()
 
+    event_payload = _parse_event_payload(row.event_json)
+    file_record = await db.get(File, row.file_id)
+    source_path = ""
+    if file_record:
+        source_path = file_record.current_path or file_record.original_path or ""
+    source_file_name = Path(source_path).name if source_path else ""
+
+    description = event_payload.description or ""
+    if len(description) > 2000:
+        description = description[:2000]
+
+    if event_payload.all_day:
+        meeting_time = event_payload.start_iso or ""
+    else:
+        meeting_time = event_payload.start_iso or ""
+        if event_payload.end_iso:
+            meeting_time = (
+                f"{meeting_time} – {event_payload.end_iso}"
+                if meeting_time
+                else event_payload.end_iso
+            )
+
     metadata: dict[str, Any] = {
         "calendar_event_id": row.id,
         "status": row.status,
+        "meeting_title": event_payload.title,
+        "meeting_time": meeting_time,
+        "meeting_location": event_payload.location,
+        "details": description,
+        "attendees": list(event_payload.attendees or []),
+        "source_file_name": source_file_name,
+        "found_in_file": True,
+        "all_day": event_payload.all_day,
+        "start_iso": event_payload.start_iso,
+        "end_iso": event_payload.end_iso,
+        "action_label": "Open in Google Calendar" if body.status == "approved" else "Dismissed",
     }
     if row.google_event_id:
         metadata["google_event_id"] = row.google_event_id
