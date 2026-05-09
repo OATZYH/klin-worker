@@ -146,6 +146,7 @@ class FileAnalysis(SQLModel, table=True):
     summary: Optional[str] = Field(default=None)
     suggested_names: Optional[str] = Field(default=None)  # JSON-serialised list[str]
     categories_hash: Optional[str] = Field(default=None)  # MD5 of active category semantics at analysis time
+    calendar_event_json: Optional[str] = Field(default=None)  # JSON-serialised latest calendar extraction (mirror of detected_calendar_events row)
     processed_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
     # relationships
@@ -198,3 +199,34 @@ class SystemLog(SQLModel, table=True):
     context_json: Optional[str] = Field(default=None)  # JSON string
     correlation_id: Optional[str] = Field(default=None, max_length=64)
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
+
+
+# ── Detected Calendar Events ────────────────────────────────────────────
+
+
+class DetectedCalendarEvent(SQLModel, table=True):
+    __tablename__ = "detected_calendar_events"  # type: ignore[assignment]
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_detected_calendar_events_status_valid",
+        ),
+        Index(
+            "ix_detected_calendar_events_status_detected_at",
+            "status",
+            "detected_at",
+        ),
+        Index(
+            "ix_detected_calendar_events_file_id",
+            "file_id",
+            unique=True,
+        ),
+    )
+
+    id: str = Field(default_factory=_new_uuid, primary_key=True)
+    file_id: str = Field(foreign_key="files.id", nullable=False)
+    event_json: str = Field(nullable=False)
+    status: str = Field(default="pending", max_length=16, nullable=False)
+    status_changed_at: Optional[datetime] = Field(default=None)
+    detected_at: datetime = Field(default_factory=_utcnow, nullable=False)
+    google_event_id: Optional[str] = Field(default=None, max_length=128)
