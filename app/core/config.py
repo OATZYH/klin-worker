@@ -105,8 +105,6 @@ class Settings(BaseSettings):
         "http://localhost:1420",  # Tauri dev default
         "http://localhost:5173",  # Vite fallback
         "tauri://localhost",  # Tauri production
-        "http://tauri.localhost",  # Tauri production (http scheme)
-        "https://tauri.localhost",  # Tauri production (https scheme)
     ]
 
     # ── SQLite ───────────────────────────────────────────────────────────
@@ -156,12 +154,6 @@ class Settings(BaseSettings):
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
     classification_top_k: int = 5  # max categories returned per file
-
-    # ── Calendar Extraction ──────────────────────────────────────────────
-    extract_calendar_events: bool = True
-    calendar_event_min_confidence: float = 0.55
-    calendar_event_max_tokens: int = 256
-    calendar_event_context_max_chars: int = 2400
 
     # ── Background Ingestion Queue (future) ──────────────────────────────
     max_queue_size: int = 1000

@@ -33,7 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db.models import Category, CategoryScore, DetectedCalendarEvent, File, FileAnalysis
+from app.db.models import Category, CategoryScore, File, FileAnalysis
 from app.core.ai_exceptions import (
     AiCapabilityUnavailableError,
     format_ai_capability_errors,
@@ -54,11 +54,6 @@ from app.models.response import (
 from app.services.background_ingest import BackgroundIngestWorker
 from app.services.categories.classification_service import ClassificationService
 from app.services.history_service import HistoryService
-from app.services.ai.calendar_extraction_service import (
-    CalendarEventDto,
-    CalendarExtractionService,
-    calendar_extraction_service,
-)
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
 from app.services.ai.rename_service import RenameService
@@ -287,10 +282,6 @@ def _get_summary() -> SummaryService:
     return SummaryService()
 
 
-def _get_calendar_extractor() -> CalendarExtractionService:
-    return calendar_extraction_service
-
-
 def _get_ingest_worker() -> BackgroundIngestWorker:
     from app.main import ingest_worker
 
@@ -396,7 +387,6 @@ async def organize_files(
     rag: RagService = Depends(_get_rag),
     classifier: ClassificationService = Depends(_get_classifier),
     summary_svc: SummaryService = Depends(_get_summary),
-    calendar_svc: CalendarExtractionService = Depends(_get_calendar_extractor),
     rename_svc: RenameService = Depends(_get_rename),
     history_svc: HistoryService = Depends(_get_history),
     system_log_svc: SystemLogService = Depends(_get_system_log),
@@ -439,7 +429,6 @@ async def organize_files(
             rag=rag,
             classifier=classifier,
             summary_svc=summary_svc,
-            calendar_svc=calendar_svc,
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
@@ -532,7 +521,6 @@ async def _process_single_file(
     rag: RagService,
     classifier: ClassificationService,
     summary_svc: SummaryService,
-    calendar_svc: CalendarExtractionService,
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
@@ -553,7 +541,6 @@ async def _process_single_file(
             rag=rag,
             classifier=classifier,
             summary_svc=summary_svc,
-            calendar_svc=calendar_svc,
             rename_svc=rename_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
@@ -569,7 +556,6 @@ async def _process_single_file_inner(
     rag: RagService,
     classifier: ClassificationService,
     summary_svc: SummaryService,
-    calendar_svc: CalendarExtractionService,
     rename_svc: RenameService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
@@ -877,40 +863,15 @@ async def _process_single_file_inner(
         pipeline["rag_status"] = prepared_ingest.ingest_status
     timings["rag_enqueue_ms"] = _elapsed_ms(step_started_at)
 
-    # ── Step 6: Generate summary + extract calendar event in parallel ──
+    # ── Step 6: Generate summary from fast parsed text ───────────────
     step_started_at = time.perf_counter()
     summary_text: str | None = None
-    calendar_event: CalendarEventDto | None = None
     try:
         extracted_text = prepared_ingest.extracted_text if prepared_ingest else None
-        summary_result, calendar_result = await asyncio.gather(
-            summary_svc.summarise(
-                scan.original_path,
-                extracted_text=extracted_text,
-            ),
-            calendar_svc.extract(
-                scan.original_path,
-                extracted_text=extracted_text,
-            ),
-            return_exceptions=True,
+        summary_text = await summary_svc.summarise(
+            scan.original_path,
+            extracted_text=extracted_text,
         )
-
-        if isinstance(summary_result, AiCapabilityUnavailableError):
-            raise summary_result
-        if isinstance(summary_result, Exception):
-            raise summary_result
-        summary_text = summary_result
-
-        if isinstance(calendar_result, Exception):
-            # Calendar extraction failures are non-fatal — log and continue.
-            logger.warning(
-                "Calendar extraction failed for %s: %s",
-                scan.original_path,
-                calendar_result,
-            )
-            calendar_event = None
-        else:
-            calendar_event = calendar_result
     except AiCapabilityUnavailableError as exc:
         return await _build_ai_unavailable_result(
             db=db,
@@ -984,57 +945,22 @@ async def _process_single_file_inner(
     step_started_at = time.perf_counter()
     # Store the analysis fingerprint so cache invalidation follows category or parser changes
     names_json = json.dumps(suggested_names) if suggested_names else None
-    calendar_event_json = (
-        calendar_event.model_dump_json() if calendar_event is not None else None
-    )
     if not is_new_file and file_record.analysis is not None:
         # Update existing — relationships were loaded via refresh in Step 2
         file_record.analysis.summary = summary_text
         file_record.analysis.suggested_names = names_json
         file_record.analysis.categories_hash = current_analysis_fingerprint
-        if calendar_event_json is not None:
-            file_record.analysis.calendar_event_json = calendar_event_json
     else:
         analysis = FileAnalysis(
             file_id=file_record.id,
             summary=summary_text,
             suggested_names=names_json,
             categories_hash=current_analysis_fingerprint,
-            calendar_event_json=calendar_event_json,
         )
         db.add(analysis)
 
     await db.flush()
     timings["analysis_save_ms"] = _elapsed_ms(step_started_at)
-
-    # ── Step 8b: Record detected calendar event (dedup by file_id) ──
-    if calendar_event is not None:
-        existing_event = await db.execute(
-            select(DetectedCalendarEvent).where(
-                DetectedCalendarEvent.file_id == file_record.id
-            )
-        )
-        existing = existing_event.scalar_one_or_none()
-        if existing is None:
-            db.add(
-                DetectedCalendarEvent(
-                    file_id=file_record.id,
-                    event_json=calendar_event_json or "{}",
-                    status="pending",
-                )
-            )
-            await db.flush()
-            await history_svc.log(
-                db=db,
-                file_id=file_record.id,
-                action="calendar_event_detected",
-                metadata={
-                    "title": calendar_event.title,
-                    "start_iso": calendar_event.start_iso,
-                    "all_day": calendar_event.all_day,
-                    "confidence": calendar_event.confidence,
-                },
-            )
 
     # ── Step 9: Classify with summary-enriched embedding ─────────────
     step_started_at = time.perf_counter()
