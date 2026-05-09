@@ -138,8 +138,8 @@ History metadata includes:
 
 1. suggested names
 2. all raw scores
-3. compact pipeline status data (`cache_reason`, `ai_status`, `rag_status`)
-4. total elapsed time only
+3. pipeline status data
+4. per-step timings
 
 ## Response Example
 
@@ -148,10 +148,12 @@ History metadata includes:
   "results": {
     "/absolute/path/to/file.pdf": {
       "file_id": "uuid",
-      "suggested_names": [
-        "quarterly_finance_report.pdf",
-        "q4_financial_summary.pdf"
-      ],
+      "analysis": {
+        "suggested_names": [
+          "quarterly_finance_report.pdf",
+          "q4_financial_summary.pdf"
+        ]
+      },
       "categories": [
         {
           "category_id": "uuid",
@@ -181,6 +183,6 @@ When a result looks wrong:
 4. Inspect ingest enqueue status.
 5. Inspect summary text quality.
 6. Inspect category embeddings and scores.
-7. Inspect Langfuse trace or system log timing breakdown.
+7. Inspect history metadata timings.
 
 You can now return to [01-overview.md](./01-overview.md) and run the smoke flow end-to-end.

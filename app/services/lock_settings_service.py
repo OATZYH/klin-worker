@@ -11,7 +11,6 @@ from typing import Iterable
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import AppSetting
-from app.observability.tracing import observe
 
 SETTING_KEY_LOCK_FILE = "lock_file"
 SETTING_KEY_LOCK_FOLDER = "lock_folder"
@@ -133,7 +132,6 @@ class LockSettingsService:
 
         return unlocked, locked
 
-    @observe(name="locks.get_settings", capture_input=False, capture_output=False)
     async def get_settings(self, db: AsyncSession) -> LockSettingsSnapshot:
         lock_file_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FILE)
         lock_folder_setting = await db.get(AppSetting, SETTING_KEY_LOCK_FOLDER)
@@ -147,7 +145,6 @@ class LockSettingsService:
             lock_folder_updated_at=lock_folder_setting.updated_at if lock_folder_setting else None,
         )
 
-    @observe(name="locks.update_settings", capture_input=False, capture_output=False)
     async def update_settings(
         self,
         db: AsyncSession,

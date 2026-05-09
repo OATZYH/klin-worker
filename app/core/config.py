@@ -95,7 +95,6 @@ class Settings(BaseSettings):
     app_name: str = "klin-worker"
     app_version: str = _resolve_app_version()
     debug: bool = False
-    app_environment: str = "development"
 
     # ── Server ───────────────────────────────────────────────────────────
     host: str = "127.0.0.1"
@@ -134,23 +133,18 @@ class Settings(BaseSettings):
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
 
-    # ── llama-server / client defaults ─────────────────────────────────
+    # ── llama-server (out-of-process, managed by Tauri) ────────────────
     llama_server_url: str = "http://127.0.0.1:8080/"
     llama_embedding_server_url: str = "http://127.0.0.1:8081/"
-    embedding_dim_size: int = 768  # must match model served by llama-server
-    llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
-    llm_output_max_tokens: int = 4096
-    rag_embedding_input_max_tokens: int = 2048  # must match --ctx-size of embedding llama-server
+    embedding_dim_size: int = 2048  # must match model served by llama-server
+    max_token_limit: int = 4096  # used for RAG chunking
 
-    # ── Summary service tuning ──────────────────────────────────────────
-    summary_retrieval_top_k: int = 2
-    summary_output_max_tokens: int = 2048
-
-    # ── Rename service tuning ───────────────────────────────────────────
-    rename_output_max_tokens: int = 96
-
-    # ── RAG service tuning ──────────────────────────────────────────────
-    rag_output_max_tokens: int = 512
+    # ── Organize pipeline tuning ────────────────────────────────────────
+    summary_rag_top_k: int = 2
+    summary_context_max_chars: int = 1200
+    summary_max_tokens: int = 64
+    rename_max_tokens: int = 48
+    rag_llm_max_tokens: int = 256
     docling_parser_max_workers: int = 2
     docling_fast_do_ocr: bool = False
     docling_fast_do_table_structure: bool = False
@@ -168,15 +162,6 @@ class Settings(BaseSettings):
     # ── System Logging ───────────────────────────────────────────────────
     system_log_retention_days: int = 30
     cleanup_system_logs_on_startup: bool = True
-
-    # ── Langfuse Tracing ─────────────────────────────────────────────────
-    langfuse_enabled: bool = False
-    langfuse_public_key: str | None = None
-    langfuse_secret_key: str | None = None
-    langfuse_host: str = "http://localhost:3000"
-    langfuse_debug: bool = False
-    langfuse_sample_rate: float = 1.0
-    langfuse_max_payload_chars: int = 4000
 
     # ── File Watcher (future) ────────────────────────────────────────────
     watch_directories: list[str] = []
@@ -200,8 +185,8 @@ class Settings(BaseSettings):
         return self.embedding_dim_size
 
     @property
-    def langfuse_environment(self) -> str:
-        return self.app_environment or ("development" if self.debug else "production")
+    def max_token_size(self) -> int:
+        return self.max_token_limit
 
 
 # Singleton – import this everywhere

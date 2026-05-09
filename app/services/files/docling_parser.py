@@ -153,8 +153,8 @@ class DoclingParser:
     def extract_text(content_list: list[dict[str, Any]]) -> str:
         """Join text and table items into a single string.
 
-        Prompt-size guarding happens later in LlmClient before the request is
-        sent to llama-server.
+        Truncated to ``settings.summary_context_max_chars`` so that the
+        summary prompt stays within a reasonable token budget.
         """
         parts: list[str] = []
         for item in content_list:
@@ -164,7 +164,8 @@ class DoclingParser:
             elif item_type == "table" and item.get("table_body"):
                 parts.append(item["table_body"])
 
-        return "\n\n".join(parts)
+        joined = "\n\n".join(parts)
+        return joined[: settings.summary_context_max_chars]
 
     # ── internal ────────────────────────────────────────────────────────
 

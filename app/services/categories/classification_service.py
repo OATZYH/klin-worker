@@ -16,7 +16,6 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.db.models import Category, CategoryScore, File
-from app.observability.tracing import observe, update_current_span
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +28,6 @@ class ClassificationService:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    @observe(name="classification.get_file_embedding", capture_input=False, capture_output=False)
     async def get_file_embedding(
         self,
         file_path: str,
@@ -43,7 +41,6 @@ class ClassificationService:
         """
         return await self._get_file_embedding(file_path, summary=summary)
 
-    @observe(name="classification.classify_with_embedding", capture_input=False, capture_output=False)
     async def classify_with_embedding(
         self,
         file_id: str,
@@ -66,7 +63,6 @@ class ClassificationService:
             )
         )
         categories = result.scalars().all()
-        update_current_span(metadata={"file_id": file_id, "category_count": len(categories)})
 
         if not categories:
             logger.info("No categories with embeddings — skipping classification")
@@ -90,11 +86,9 @@ class ClassificationService:
 
         # Persist scores to DB
         await self._save_scores(file_id, scores, db)
-        update_current_span(output={"score_count": len(scores)})
 
         return scores
 
-    @observe(name="classification.classify", capture_input=False, capture_output=False)
     async def classify(
         self,
         file_id: str,
@@ -125,7 +119,6 @@ class ClassificationService:
 
     # ── Embedding helpers ────────────────────────────────────────────────
 
-    @observe(name="classification.generate_category_embedding", capture_input=False, capture_output=False)
     async def generate_category_embedding(
         self,
         text: str,

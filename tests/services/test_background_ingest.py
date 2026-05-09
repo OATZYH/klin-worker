@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from app.services.organize.background_ingest import BackgroundIngestWorker
+from app.services.background_ingest import BackgroundIngestWorker
 
 
 class FakeParser:
@@ -78,24 +78,5 @@ def test_worker_falls_back_to_rag_ingest_when_rich_parse_is_empty() -> None:
         assert prepared.extracted_text == "fast summary text"
         assert rag_service._rag.insert_calls == []
         assert rag_service.ingest_calls == ["/tmp/report.pdf"]
-
-    asyncio.run(run())
-
-
-def test_prepare_returns_text_without_queue_when_worker_not_ready() -> None:
-    async def run() -> None:
-        fast_content = [{"type": "text", "text": "fast summary text", "page_idx": 0}]
-        fast_parser = FakeParser("fast", fast_content)
-        rich_parser = FakeParser("rich", [])
-        worker = BackgroundIngestWorker(fast_parser=fast_parser, rich_parser=rich_parser)
-
-        prepared = await worker.prepare("/tmp/report.pdf")
-
-        assert prepared.ingest_status == "not_ready"
-        assert prepared.extracted_text == "fast summary text"
-        assert fast_parser.parse_calls == ["/tmp/report.pdf"]
-        assert rich_parser.parse_calls == []
-        assert worker.queue_size == 0
-        assert worker.is_pending("/tmp/report.pdf") is False
 
     asyncio.run(run())

@@ -95,7 +95,7 @@ Category scoring using embeddings and cosine similarity.
 
 ## `SummaryWorkflowService`
 
-Orchestrates single-file summary endpoint behavior.
+Orchestrates multi-file summary endpoint behavior.
 
 - cache-aware per-file summary generation
 - persistence into `file_analysis`

@@ -163,7 +163,7 @@ Response model is keyed by input filepath:
   "results": {
     "/absolute/path/file.pdf": {
       "file_id": "...",
-      "suggested_names": ["..."],
+      "analysis": { "suggested_names": ["..."] },
       "categories": [
         { "category_id": "...", "name": "...", "score": 82.4 }
       ],
@@ -247,14 +247,17 @@ This endpoint updates backend state and audit trail. Actual filesystem mutation 
 
 1. Build `SummaryWorkflowService`.
 2. Ensure general AI availability.
-3. Resolve one file path from the request.
-4. Always generate a fresh summary via `SummaryService`.
-5. Persist the new summary back into `file_analysis`, replacing any existing summary.
-6. Return the raw single-file summary string, or a plain-text fallback if generation fails.
+3. For each file:
+   - return cached `file_analysis.summary` if available and not forced
+   - otherwise generate summary via `SummaryService`
+   - persist generated summary back into `file_analysis`
+4. Compose a multi-file markdown synthesis with LLM.
+5. If compose fails, use deterministic markdown fallback.
 
 `POST /api/summary/stream`:
 
-- Same single-file preparation, then emit the summary via SSE (`meta`, `chunk`, `done`).
+- Same per-file preparation, then stream synthesis tokens via SSE (`event: chunk`).
+- Emits `meta` and `done` events for UI.
 
 `SummaryService` strategy:
 

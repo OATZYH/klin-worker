@@ -36,8 +36,8 @@ Most important fields for local development:
 - `rag_working_dir`
 - `llama_server_url`
 - `embedding_dim_size`
-- `summary_output_max_tokens`
-- `rename_output_max_tokens`
+- `summary_max_tokens`
+- `rename_max_tokens`
 - `classification_top_k`
 
 Storage path behavior differs between source run and frozen bundle. Read this file before changing environment assumptions.

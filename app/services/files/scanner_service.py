@@ -16,7 +16,6 @@ from typing import Optional
 import aiofiles
 
 from app.core.config import settings
-from app.observability.tracing import observe, update_current_span
 from app.services.files.scan_result import ScanResult
 
 
@@ -25,7 +24,6 @@ class ScannerService:
 
     # ── Public API ───────────────────────────────────────────────────────
 
-    @observe(name="files.scan", capture_input=False, capture_output=False)
     async def scan(self, file_path: str) -> ScanResult:
         """
         Scan a single file and return its metadata.
@@ -33,7 +31,6 @@ class ScannerService:
         Raises nothing — errors are captured in `ScanResult.error`.
         """
         path = Path(file_path)
-        update_current_span(input={"file_path": str(path)})
 
         # 1. Security checks
         violation = self._check_security(path)
@@ -66,7 +63,6 @@ class ScannerService:
         except Exception as exc:
             return self._error_result(file_path, f"Scan failed: {exc}")
 
-    @observe(name="files.scan_many", capture_input=False, capture_output=False)
     async def scan_many(self, file_paths: list[str]) -> list[ScanResult]:
         """Scan multiple files sequentially (keeps I/O predictable)."""
         return [await self.scan(fp) for fp in file_paths]

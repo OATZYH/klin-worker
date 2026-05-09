@@ -16,22 +16,12 @@ import json
 import logging
 import queue
 import threading
-from copy import deepcopy
-from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Iterator
 
 import httpx
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
-from app.observability.tracing import (
-    observe,
-    sanitize_for_trace,
-    sanitize_messages,
-    start_as_current_observation,
-    update_current_generation,
-    update_current_span,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -54,59 +44,8 @@ class LlmClient:
         self._embed_server_reachable: bool = False
         self._model_id: str = ""
 
-    @staticmethod
-    def _truncate_text_value(value: str, max_chars: int) -> str:
-        """Apply a coarse character guard to reduce worst-case prompt size."""
-        if max_chars <= 0 or len(value) <= max_chars:
-            return value
-        return value[:max_chars]
-
-    def _apply_input_char_guard(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Trim text-bearing message content before sending requests to llama-server."""
-        max_chars = settings.llm_input_max_chars
-        if max_chars <= 0:
-            return messages
-
-        guarded_messages = deepcopy(messages)
-        for message in guarded_messages:
-            content = message.get("content")
-            if isinstance(content, str):
-                message["content"] = self._truncate_text_value(content, max_chars)
-                continue
-
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "text":
-                        text_value = part.get("text")
-                        if isinstance(text_value, str):
-                            part["text"] = self._truncate_text_value(text_value, max_chars)
-        return guarded_messages
-
-    @staticmethod
-    def _chat_template_kwargs() -> dict[str, bool]:
-        return {"enable_thinking": False}
-
-    def _build_chat_request_body(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        temperature: float,
-        max_tokens: int,
-        stream: bool = False,
-    ) -> dict[str, Any]:
-        body: dict[str, Any] = {
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "chat_template_kwargs": self._chat_template_kwargs(),
-        }
-        if stream:
-            body["stream"] = True
-        return body
-
     # ── Lifecycle ────────────────────────────────────────────────────────
 
-    @observe(name="llm.startup", capture_input=False, capture_output=False)
     async def startup(self) -> None:
         """
         Create the httpx client and optionally check server reachability.
@@ -144,7 +83,6 @@ class LlmClient:
         except AiCapabilityUnavailableError as exc:
             logger.warning("Embeddings support: false (%s)", exc.detail)
 
-    # @observe(name="llm.shutdown", capture_input=False, capture_output=False)
     async def shutdown(self) -> None:
         """Close the httpx client.  Call at app shutdown."""
         if self._chat_client is not None:
@@ -175,18 +113,15 @@ class LlmClient:
     def is_loaded(self) -> bool:
         return self.is_ready
 
-    @observe(name="llm.ensure_general", capture_input=False, capture_output=True)
     async def ensure_general_available(self) -> None:
         """Validate that the llama-server can handle general chat requests."""
         self._assert_chat_client_started()
-        update_current_span(metadata={"server": settings.llama_server_url})
 
         try:
             resp = await self._chat_client.get("/models", timeout=10.0)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
-            # Support both OpenAI-compat {"data": [...]} and llama-server {"models": [...]}
-            models = data.get("data") or data.get("models") or []
+            models = data.get("data", [])
             self._chat_server_reachable = True
 
             if not models:
@@ -197,25 +132,10 @@ class LlmClient:
                     "General AI is unavailable because llama-server has no loaded model.",
                 )
 
-            first = models[0]
-            self._model_id = (
-                first.get("id") or first.get("name") or first.get("model") or "unknown"
-            )
-
-            # capabilities live in "models" array (llama-server format), not "data" array.
-            # Check it explicitly regardless of which list was used above.
-            _capabilities: list[str] = []
-            for m in data.get("models") or []:
-                if (m.get("id") or m.get("name") or m.get("model")) == self._model_id:
-                    _capabilities = [c.lower() for c in (m.get("capabilities") or [])]
-                    break
-
+            self._model_id = models[0].get("id", "unknown")
             _vision_keywords = ("vl", "vision", "multimodal", "mm")
-            if _capabilities:
-                self._vision_supported = any(kw in _capabilities for kw in _vision_keywords)
-            else:
-                self._vision_supported = any(kw in self._model_id.lower() for kw in _vision_keywords)
-            update_current_span(output={"model": self._model_id, "vision_supported": self._vision_supported})
+            name_lower = self._model_id.lower()
+            self._vision_supported = any(kw in name_lower for kw in _vision_keywords)
         except AiCapabilityUnavailableError:
             raise
         except Exception as exc:
@@ -225,7 +145,6 @@ class LlmClient:
                 "General AI is unavailable because llama-server cannot be reached.",
             ) from exc
 
-    @observe(name="llm.ensure_embedding", capture_input=False, capture_output=True)
     async def ensure_embedding_available(
         self,
         *,
@@ -246,7 +165,6 @@ class LlmClient:
             resp.raise_for_status()
             self._embed_server_reachable = True
             self._embeddings_supported = True
-            update_current_span(output={"embeddings_supported": True})
         except Exception as exc:
             self._embed_server_reachable = False
             self._embeddings_supported = False
@@ -257,7 +175,6 @@ class LlmClient:
 
     # ── Chat completions ─────────────────────────────────────────────────
 
-    @observe(name="llm.chat", as_type="generation", capture_input=False, capture_output=False)
     async def achat(
         self,
         messages: list[dict[str, str]],
@@ -271,38 +188,19 @@ class LlmClient:
         Returns the assistant message content as a plain string.
         """
         self._assert_chat_client_started()
-        guarded_messages = self._apply_input_char_guard(messages)
-        requested_max_tokens = max_tokens or settings.llm_output_max_tokens
-        body = self._build_chat_request_body(
-            guarded_messages,
-            temperature=temperature,
-            max_tokens=requested_max_tokens,
-        )
-        update_current_generation(
-            input={"messages": sanitize_messages(guarded_messages)},
-            model=self._model_id or None,
-            model_parameters={
-                "temperature": temperature,
-                "max_tokens": requested_max_tokens,
-                "enable_thinking": False,
-            },
-        )
+
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+        }
 
         try:
             resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
             self._chat_server_reachable = True
-            content = data["choices"][0]["message"]["content"].strip()
-            usage = data.get("usage") or {}
-            usage_details = None
-            if usage:
-                usage_details = {
-                    "input": int(usage.get("prompt_tokens", 0) or 0),
-                    "output": int(usage.get("completion_tokens", 0) or 0),
-                }
-            update_current_generation(output=content, usage_details=usage_details)
-            return content
+            return data["choices"][0]["message"]["content"].strip()
         except Exception as exc:
             self._mark_general_unavailable()
             raise AiCapabilityUnavailableError(
@@ -345,8 +243,6 @@ class LlmClient:
                 break
             if isinstance(item, Exception):
                 raise item
-            if not isinstance(item, str):
-                continue
             yield item
 
     async def achat_stream(
@@ -358,91 +254,63 @@ class LlmClient:
     ) -> AsyncIterator[str]:
         """Stream chat completion tokens from llama-server."""
         self._assert_chat_client_started()
-        guarded_messages = self._apply_input_char_guard(messages)
-        requested_max_tokens = max_tokens or settings.llm_output_max_tokens
-        body = self._build_chat_request_body(
-            guarded_messages,
-            temperature=temperature,
-            max_tokens=requested_max_tokens,
-            stream=True,
-        )
-        aggregated: list[str] = []
-        first_token_at: datetime | None = None
 
-        with start_as_current_observation(
-            name="llm.chat_stream",
-            as_type="generation",
-            input={"messages": sanitize_messages(guarded_messages)},
-            model=self._model_id or None,
-            model_parameters={
-                "temperature": temperature,
-                "max_tokens": requested_max_tokens,
-                "enable_thinking": False,
-                "stream": True,
-            },
-        ):
-            try:
-                async with self._chat_client.stream(  # type: ignore[union-attr]
-                    "POST",
-                    "/chat/completions",
-                    json=body,
-                ) as resp:
-                    resp.raise_for_status()
-                    self._chat_server_reachable = True
+        body: dict[str, Any] = {
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens or settings.max_token_size,
+            "stream": True,
+        }
 
-                    async for raw_line in resp.aiter_lines():
-                        line = raw_line.strip()
-                        if not line:
-                            continue
+        try:
+            async with self._chat_client.stream(  # type: ignore[union-attr]
+                "POST",
+                "/chat/completions",
+                json=body,
+            ) as resp:
+                resp.raise_for_status()
+                self._chat_server_reachable = True
 
-                        payload = line
-                        if payload.startswith("data:"):
-                            payload = payload[len("data:"):].strip()
+                async for raw_line in resp.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
 
-                        if payload == "[DONE]":
-                            break
+                    payload = line
+                    if payload.startswith("data:"):
+                        payload = payload[len("data:"):].strip()
 
-                        try:
-                            data = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
+                    if payload == "[DONE]":
+                        break
 
-                        choices = data.get("choices", [])
-                        if not choices:
-                            continue
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
 
-                        first_choice = choices[0]
-                        delta = first_choice.get("delta") or {}
-                        content = delta.get("content")
+                    choices = data.get("choices", [])
+                    if not choices:
+                        continue
 
-                        if not content:
-                            message = first_choice.get("message") or {}
-                            content = message.get("content")
+                    first_choice = choices[0]
+                    delta = first_choice.get("delta") or {}
+                    content = delta.get("content")
 
-                        if isinstance(content, str) and content:
-                            aggregated.append(content)
-                            if first_token_at is None:
-                                first_token_at = datetime.now(timezone.utc)
-                                update_current_generation(completion_start_time=first_token_at)
-                            yield content
+                    if not content:
+                        message = first_choice.get("message") or {}
+                        content = message.get("content")
 
-                update_current_generation(
-                    output={
-                        "content": "".join(aggregated),
-                        "chunk_count": len(aggregated),
-                    }
-                )
-            except Exception as exc:
-                self._mark_general_unavailable()
-                update_current_generation(level="ERROR", status_message=str(exc))
-                raise AiCapabilityUnavailableError(
-                    "general",
-                    "General AI is unavailable because llama-server cannot stream chat requests.",
-                ) from exc
+                    if isinstance(content, str) and content:
+                        yield content
+        except Exception as exc:
+            self._mark_general_unavailable()
+            raise AiCapabilityUnavailableError(
+                "general",
+                "General AI is unavailable because llama-server cannot stream chat requests.",
+            ) from exc
 
     # ── Vision / multimodal ─────────────────────────────────────────────
 
-    @observe(name="llm.chat_vision", as_type="generation", capture_input=False, capture_output=False)
     async def achat_with_vision(
         self,
         messages: list[dict[str, Any]],
@@ -467,30 +335,16 @@ class LlmClient:
             )
 
         try:
-            guarded_messages = self._apply_input_char_guard(messages)
-            requested_max_tokens = max_tokens or settings.llm_output_max_tokens
-            update_current_generation(
-                input={"messages": sanitize_messages(guarded_messages)},
-                model=self._model_id or None,
-                model_parameters={
-                    "temperature": temperature,
-                    "max_tokens": requested_max_tokens,
-                    "enable_thinking": False,
-                    "vision": True,
-                },
-            )
-            body = self._build_chat_request_body(
-                guarded_messages,
-                temperature=temperature,
-                max_tokens=requested_max_tokens,
-            )
+            body: dict[str, Any] = {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens or settings.max_token_size,
+            }
             resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
             self._chat_server_reachable = True
-            content = data["choices"][0]["message"]["content"].strip()
-            update_current_generation(output=content)
-            return content
+            return data["choices"][0]["message"]["content"].strip()
         except AiCapabilityUnavailableError:
             raise
         except Exception as exc:
@@ -555,47 +409,36 @@ class LlmClient:
         self._assert_embedding_client_started()
 
         body: dict[str, Any] = {"input": texts}
-        with start_as_current_observation(
-            name="llm.embed",
-            as_type="embedding",
-            input={"texts": sanitize_for_trace(texts), "text_count": len(texts)},
-            model="llama-embedding-server",
-        ) as observation:
-            try:
-                resp = await self._embed_client.post("/embeddings", json=body)  # type: ignore[union-attr]
-                resp.raise_for_status()
-                resp_json = resp.json()
-                # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
-                data = resp_json if isinstance(resp_json, list) else resp_json["data"]
-                self._embed_server_reachable = True
-                self._embeddings_supported = True
-            except Exception as exc:
-                self._embed_server_reachable = False
-                self._embeddings_supported = False
-                if observation is not None:
-                    observation.update(level="ERROR", status_message=str(exc))
-                raise AiCapabilityUnavailableError(
-                    "embedding",
-                    "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
-                ) from exc
+        try:
+            resp = await self._embed_client.post("/embeddings", json=body)  # type: ignore[union-attr]
+            resp.raise_for_status()
+            resp_json = resp.json()
+            # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
+            data = resp_json if isinstance(resp_json, list) else resp_json["data"]
+            self._embed_server_reachable = True
+            self._embeddings_supported = True
+        except Exception as exc:
+            self._embed_server_reachable = False
+            self._embeddings_supported = False
+            raise AiCapabilityUnavailableError(
+                "embedding",
+                "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
+            ) from exc
 
-            pooled: list[list[float]] = []
-            for item in data:
-                emb = item["embedding"]
-                if emb and isinstance(emb[0], list):
-                    n_tokens = len(emb)
-                    dim = len(emb[0])
-                    avg = [
-                        sum(emb[t][d] for t in range(n_tokens)) / n_tokens
-                        for d in range(dim)
-                    ]
-                    pooled.append(avg)
-                else:
-                    pooled.append(emb)
-
-            if observation is not None:
-                observation.update(output={"vector_count": len(pooled)})
-            return pooled
+        pooled: list[list[float]] = []
+        for item in data:
+            emb = item["embedding"]
+            if emb and isinstance(emb[0], list):
+                n_tokens = len(emb)
+                dim = len(emb[0])
+                avg = [
+                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                    for d in range(dim)
+                ]
+                pooled.append(avg)
+            else:
+                pooled.append(emb)
+        return pooled
 
     # ── Internals ────────────────────────────────────────────────────────
 

@@ -45,11 +45,17 @@ class SelectedCategoryScoreResponse(BaseModel):
 # ── Organize ─────────────────────────────────────────────────────────────
 
 
+class FileAnalysisResponse(BaseModel):
+    """AI-generated analysis of a single file."""
+
+    suggested_names: list[str] = Field(default_factory=list)
+
+
 class OrganizeFileResult(BaseModel):
     """Per-file result returned from POST /api/organize."""
 
     file_id: str
-    suggested_names: list[str] = Field(default_factory=list)
+    analysis: FileAnalysisResponse
     categories: list[CategoryScoreResponse]
     error: Optional[str] = None
 

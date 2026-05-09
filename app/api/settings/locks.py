@@ -16,7 +16,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.db.session import get_db
 from app.models.request import LockSettingsUpdateRequest
 from app.models.response import LockSettingStatus, LockSettingsResponse
-from app.services.settings.lock_settings_service import (
+from app.services.lock_settings_service import (
     LockSettingsService,
     SETTING_KEY_LOCK_FILE,
     SETTING_KEY_LOCK_FOLDER,

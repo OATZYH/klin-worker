@@ -15,7 +15,6 @@ from sqlmodel import delete, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.db.models import SystemLog
-from app.observability.tracing import get_current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,6 @@ class SystemLogService:
         correlation_id: str | None = None,
     ) -> SystemLog:
         """Record a structured operational event."""
-        correlation_id = correlation_id or get_current_trace_id()
         entry = SystemLog(
             level=level.upper(),
             component=component,
