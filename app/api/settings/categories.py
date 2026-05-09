@@ -27,7 +27,7 @@ from app.db.session import get_db
 from app.models.request import BatchCategoryCreate, CategoryCreate, CategoryUpdate
 from app.models.response import CategoryResponse
 from app.services.categories.category_embedding_text import build_category_embedding_text
-from app.services.categories.classification_service import ClassificationService
+from app.services.organize.classification_service import ClassificationService
 from app.services.ai.rag_service import RagService
 
 logger = logging.getLogger(__name__)

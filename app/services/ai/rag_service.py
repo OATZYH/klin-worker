@@ -14,6 +14,7 @@ manage a separate vector store.
 LLM backend: llama-server (out-of-process, managed by Tauri).
 """
 
+from dataclasses import fields
 import logging
 from pathlib import Path
 import time
@@ -23,9 +24,71 @@ import numpy as np
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
+from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_doc_status_record(doc_id: str, record: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """Normalize persisted LightRAG doc-status records to the active dataclass shape."""
+    if not isinstance(record, dict):
+        logger.warning("Skipping invalid doc-status record for %s: expected dict", doc_id)
+        return None, []
+
+    from lightrag.base import DocProcessingStatus
+
+    allowed_keys = {field.name for field in fields(DocProcessingStatus)}
+    sanitized = record.copy()
+    sanitized.pop("content", None)
+    sanitized.setdefault("file_path", "no-file-path")
+    sanitized.setdefault("metadata", {})
+    sanitized.setdefault("error_msg", None)
+    sanitized.setdefault("chunks_list", [])
+
+    unknown_keys = sorted(key for key in sanitized if key not in allowed_keys)
+    for key in unknown_keys:
+        sanitized.pop(key, None)
+
+    return sanitized, unknown_keys
+
+
+async def ensure_rag_doc_status_compatible(rag_engine: Any) -> int:
+    """Remove stale/unknown doc-status fields before LightRAG deserializes them."""
+    if hasattr(rag_engine, "_ensure_lightrag_initialized"):
+        init_result = await rag_engine._ensure_lightrag_initialized()  # noqa: SLF001
+        if isinstance(init_result, dict) and not init_result.get("success", False):
+            error = init_result.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(str(error))
+
+    lightrag = getattr(rag_engine, "lightrag", None)
+    doc_status = getattr(lightrag, "doc_status", None)
+    storage_lock = getattr(doc_status, "_storage_lock", None)
+    storage_data = getattr(doc_status, "_data", None)
+    if doc_status is None or storage_lock is None or storage_data is None:
+        return 0
+
+    updates: dict[str, dict[str, Any]] = {}
+    dropped_keys: dict[str, list[str]] = {}
+    async with storage_lock:
+        for doc_id, record in storage_data.items():
+            sanitized, unknown_keys = _sanitize_doc_status_record(doc_id, record)
+            if sanitized is None or sanitized == record:
+                continue
+            updates[doc_id] = sanitized
+            if unknown_keys:
+                dropped_keys[doc_id] = unknown_keys
+
+    if not updates:
+        return 0
+
+    await doc_status.upsert(updates)
+    logger.warning(
+        "Normalized %d LightRAG doc-status record(s) for compatibility: %s",
+        len(updates),
+        dropped_keys,
+    )
+    return len(updates)
 
 
 def _coerce_positive_int(value: Any) -> int | None:
@@ -43,7 +106,7 @@ def _resolve_llm_max_tokens(kwargs: dict[str, Any]) -> int:
         resolved = _coerce_positive_int(kwargs.get(key))
         if resolved is not None:
             return resolved
-    return settings.rag_llm_max_tokens
+    return settings.rag_output_max_tokens
 
 
 def _resolve_llm_temperature(kwargs: dict[str, Any]) -> float:
@@ -69,6 +132,7 @@ class RagService:
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
+    @observe(name="rag.setup", capture_input=False, capture_output=False)
     async def setup(self) -> None:
         """
         Lazy-initialise the RAG-Anything engine with llama-server as LLM backend.
@@ -108,7 +172,7 @@ class RagService:
             # Embedding function configured for llama-server
             embedding_func = EmbeddingFunc(
                 embedding_dim=settings.embedding_dim,
-                max_token_size=settings.max_token_size,
+                max_token_size=settings.rag_embedding_input_max_tokens,
                 func=_embed,
             )
 
@@ -185,6 +249,7 @@ class RagService:
                 },
             )
             self._ready = True
+            update_current_span(output={"ready": True, "working_dir": str(working_dir)})
             logger.info(
                 "RAG-Anything initialised  →  %s  (embd_dim: %d)",
                 working_dir,
@@ -219,6 +284,7 @@ class RagService:
 
     # ── Embedding ────────────────────────────────────────────────────────
 
+    @observe(name="rag.embed_texts", capture_input=False, capture_output=False)
     async def embed_texts(self, texts: list[str]) -> Any:
         """
         Generate embeddings for a list of texts.
@@ -227,10 +293,12 @@ class RagService:
         Used by ClassificationService for category ↔ file similarity.
         """
         await self.ensure_embedding_available()
+        update_current_span(metadata={"text_count": len(texts)})
         return await self._embed_func(texts)
 
     # ── Ingestion ────────────────────────────────────────────────────────
 
+    @observe(name="rag.ingest", capture_input=False, capture_output=False)
     async def ingest(self, file_path: str) -> bool:
         """
         Ingest a single file into the RAG engine by its absolute path.
@@ -239,6 +307,7 @@ class RagService:
         """
         self.ensure_ready()
         started_at = time.perf_counter()
+        update_current_span(input={"file_path": file_path})
 
         try:
             path = Path(file_path)
@@ -256,6 +325,7 @@ class RagService:
                 file_path,
                 (time.perf_counter() - started_at) * 1000,
             )
+            update_current_span(output={"ingested": True})
             return True
         except Exception as exc:
             logger.error(
@@ -264,6 +334,7 @@ class RagService:
                 (time.perf_counter() - started_at) * 1000,
                 exc,
             )
+            update_current_span(output={"ingested": False}, level="ERROR", status_message=str(exc))
             return False
 
     # ── Semantic Search ──────────────────────────────────────────────────

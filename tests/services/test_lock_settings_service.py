@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.lock_settings_service import LockSettingsService, LockSettingsSnapshot
+from app.services.settings.lock_settings_service import LockSettingsService, LockSettingsSnapshot
 
 
 def _empty_snapshot() -> LockSettingsSnapshot:

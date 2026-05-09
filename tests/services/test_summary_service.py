@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.services.ai.summary_service import SummaryService
+from app.services.summary.summary_service import SummaryService
 
 
 def test_get_text_context_prefers_extracted_text() -> None:
     text = "important content " * 10
-
     context = SummaryService._get_text_context(Path("/tmp/report.pdf"), text)
 
     assert context == text
