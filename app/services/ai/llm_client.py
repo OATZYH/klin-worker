@@ -123,6 +123,7 @@ class LlmClient:
         temperature: float,
         max_tokens: int,
         stream: bool = False,
+        response_format: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "messages": messages,
@@ -132,6 +133,8 @@ class LlmClient:
         }
         if stream:
             body["stream"] = True
+        if response_format is not None:
+            body["response_format"] = response_format
         return body
 
     # ── Lifecycle ────────────────────────────────────────────────────────
@@ -298,12 +301,13 @@ class LlmClient:
     @observe(name="llm.chat", as_type="generation", capture_input=False, capture_output=False)
     async def achat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         temperature: float = 0.3,
         max_tokens: int | None = None,
         trace_name: str | None = None,
         trace_metadata: Any = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         """
         Run a chat completion via the llama-server ``/chat/completions`` endpoint.
@@ -317,17 +321,24 @@ class LlmClient:
             guarded_messages,
             temperature=temperature,
             max_tokens=requested_max_tokens,
+            response_format=response_format,
         )
+        model_parameters: dict[str, Any] = {
+            "temperature": temperature,
+            "max_tokens": requested_max_tokens,
+            "enable_thinking": False,
+        }
+        if response_format is not None:
+            model_parameters["response_format"] = {
+                "type": response_format.get("type"),
+                "name": (response_format.get("json_schema") or {}).get("name"),
+            }
         update_current_generation(
             input={"messages": sanitize_messages(guarded_messages)},
             name=trace_name,
             metadata=trace_metadata,
             model=self._model_id or None,
-            model_parameters={
-                "temperature": temperature,
-                "max_tokens": requested_max_tokens,
-                "enable_thinking": False,
-            },
+            model_parameters=model_parameters,
         )
 
         try:
@@ -336,7 +347,9 @@ class LlmClient:
             resp.raise_for_status()
             data = resp.json()
             self._chat_server_reachable = True
-            content = data["choices"][0]["message"]["content"].strip()
+            first_choice = data["choices"][0]
+            content = first_choice["message"]["content"].strip()
+            finish_reason = first_choice.get("finish_reason")
             usage = data.get("usage") or {}
             usage_details = None
             if usage:
@@ -344,7 +357,17 @@ class LlmClient:
                     "input": int(usage.get("prompt_tokens", 0) or 0),
                     "output": int(usage.get("completion_tokens", 0) or 0),
                 }
-            update_current_generation(output=content, usage_details=usage_details)
+            completion_metadata = trace_metadata
+            if finish_reason:
+                completion_metadata = {
+                    **(trace_metadata if isinstance(trace_metadata, dict) else {}),
+                    "finish_reason": finish_reason,
+                }
+            update_current_generation(
+                output=content,
+                metadata=completion_metadata,
+                usage_details=usage_details,
+            )
             return content
         except Exception as exc:
             self._mark_general_unavailable()

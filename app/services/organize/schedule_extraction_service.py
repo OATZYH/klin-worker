@@ -34,7 +34,7 @@ _DEFAULT_TIMEZONE = "Asia/Bangkok"
 _MAX_CONTEXT_CHARS = 16_000
 _SMALL_DOCUMENT_CHARS = 8_000
 _SOURCE_TEXT_MAX_CHARS = 1_200
-_SCHEDULE_LLM_TIMEOUT_SECONDS = 20.0
+_SCHEDULE_LLM_TIMEOUT_SECONDS = 60.0
 
 _SCHEDULE_SIGNAL_RE = re.compile(
     r"("
@@ -129,6 +129,7 @@ class ScheduleExtractionService:
                         "context_chars": len(context),
                         "schema": "ScheduleExtractionResponse",
                     },
+                    response_format=self._schedule_response_format(),
                 ),
                 timeout=_SCHEDULE_LLM_TIMEOUT_SECONDS,
             )
@@ -156,9 +157,14 @@ class ScheduleExtractionService:
             payload = self._parse_json_payload(raw)
             result = ScheduleExtractionResponse.model_validate(payload)
         except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+            parse_error = self._parse_error_details(raw, exc)
             logger.warning("Schedule extraction returned invalid JSON for %s: %s", file_path, exc)
             update_current_span(
-                output={"event_count": 0, "error": "invalid_json"},
+                output={
+                    "event_count": 0,
+                    "error": "invalid_json",
+                    "parse_error": parse_error,
+                },
                 level="ERROR",
                 status_message=str(exc),
             )
@@ -198,7 +204,7 @@ class ScheduleExtractionService:
                 page = 0
             pages.setdefault(page, []).append(text)
 
-        return {page: "\n\n".join(parts) for page, parts in sorted(pages.items())}
+        return {page: "\n\n".join(dict.fromkeys(parts)) for page, parts in sorted(pages.items())}
 
     @staticmethod
     def _join_pages(pages: dict[int, str]) -> str:
@@ -311,6 +317,32 @@ class ScheduleExtractionService:
         return text[start:]
 
     @staticmethod
+    def _normalise_attendees(attendees: Any) -> list[dict[str, Any]]:
+        if not isinstance(attendees, list):
+            return []
+        result = []
+        for a in attendees:
+            if not isinstance(a, dict):
+                continue
+            email = a.get("email", "")
+            parts = email.split("@") if isinstance(email, str) else []
+            if len(parts) == 2 and "." in parts[1]:
+                result.append(a)
+            if len(result) >= 20:
+                break
+        return result
+
+    @staticmethod
+    def _normalise_reminders(reminders: Any) -> dict[str, Any]:
+        if isinstance(reminders, dict):
+            return reminders
+        if isinstance(reminders, list):
+            for reminder in reminders:
+                if isinstance(reminder, dict):
+                    return reminder
+        return {"useDefault": True}
+
+    @staticmethod
     def _normalise_payload(payload: dict[str, Any]) -> dict[str, Any]:
         events = payload.get("events")
         if not isinstance(events, list):
@@ -325,9 +357,155 @@ class ScheduleExtractionService:
             source_pages = copied.get("source_pages")
             if isinstance(source_pages, int):
                 copied["source_pages"] = [source_pages]
+            confidence = copied.get("confidence")
+            if isinstance(confidence, (int, float)) and confidence > 1:
+                copied["confidence"] = round(confidence / 100, 4)
+            source_text = copied.get("source_text")
+            if isinstance(source_text, str) and len(source_text) > _SOURCE_TEXT_MAX_CHARS:
+                copied["source_text"] = source_text[:_SOURCE_TEXT_MAX_CHARS].rstrip()
+            google_event = copied.get("google_event")
+            if isinstance(google_event, dict):
+                ge = dict(google_event)
+                ge["attendees"] = ScheduleExtractionService._normalise_attendees(
+                    ge.get("attendees")
+                )
+                ge["reminders"] = ScheduleExtractionService._normalise_reminders(
+                    ge.get("reminders")
+                )
+                for dt_field in ("start", "end"):
+                    val = ge.get(dt_field)
+                    if isinstance(val, str):
+                        ge[dt_field] = {"dateTime": val, "timeZone": _DEFAULT_TIMEZONE}
+                copied["google_event"] = ge
             normalised_events.append(copied)
 
         return {**payload, "events": normalised_events}
+
+    @staticmethod
+    def _parse_error_details(raw: str, exc: Exception) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "raw_length": len(raw),
+        }
+        if isinstance(exc, json.JSONDecodeError):
+            pos = exc.pos
+            start = max(0, pos - 80)
+            end = min(len(raw), pos + 80)
+            details.update({
+                "position": pos,
+                "raw_prefix": raw[start:pos],
+                "raw_suffix": raw[pos:end],
+            })
+        else:
+            details["raw_prefix"] = raw[:120]
+            details["raw_suffix"] = raw[-120:]
+        return details
+
+    @staticmethod
+    def _schedule_response_format() -> dict[str, Any]:
+        date_time_schema = {
+            "type": "object",
+            "properties": {
+                "dateTime": {"type": "string"},
+                "timeZone": {"type": "string"},
+            },
+            "required": ["dateTime", "timeZone"],
+            "additionalProperties": False,
+        }
+        google_event_schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "description": {"type": ["string", "null"]},
+                "location": {"type": ["string", "null"]},
+                "start": date_time_schema,
+                "end": date_time_schema,
+                "attendees": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "email": {"type": "string"},
+                            "displayName": {"type": ["string", "null"]},
+                        },
+                        "required": ["email"],
+                        "additionalProperties": False,
+                    },
+                },
+                "reminders": {
+                    "type": "object",
+                    "properties": {"useDefault": {"type": "boolean"}},
+                    "required": ["useDefault"],
+                    "additionalProperties": False,
+                },
+            },
+            "required": [
+                "summary",
+                "description",
+                "location",
+                "start",
+                "end",
+                "attendees",
+                "reminders",
+            ],
+            "additionalProperties": False,
+        }
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "schedule_extraction_response",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "events": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": [
+                                            "meeting",
+                                            "flight",
+                                            "appointment",
+                                            "other",
+                                        ],
+                                    },
+                                    "confidence": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1,
+                                    },
+                                    "source_pages": {
+                                        "type": "array",
+                                        "items": {"type": "integer"},
+                                    },
+                                    "source_text": {"type": "string"},
+                                    "missing_fields": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "google_event": google_event_schema,
+                                },
+                                "required": [
+                                    "type",
+                                    "confidence",
+                                    "source_pages",
+                                    "source_text",
+                                    "missing_fields",
+                                    "google_event",
+                                ],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "error": {"type": ["string", "null"]},
+                    },
+                    "required": ["events", "error"],
+                    "additionalProperties": False,
+                },
+            },
+        }
 
     @staticmethod
     def _build_prompt(
@@ -341,25 +519,23 @@ class ScheduleExtractionService:
         page_hint = ", ".join(str(page) for page in source_pages) or "unknown"
         return (
             "You extract calendar events from local files. "
-            "Return ONLY one valid JSON object, never a markdown fence and never a top-level array. "
-            "The exact top-level shape is: "
-            '{"events":[...],"error":null}. '
+            "Return only JSON that matches the provided schema. "
             "Create zero or more event drafts. Do not invent missing dates or times. "
             "If required start/end time is missing, omit that event. "
-            "Use RFC3339 dateTime values. If timezone is not explicit, use "
-            f"{_DEFAULT_TIMEZONE}. "
+            f"If timezone is not explicit, use {_DEFAULT_TIMEZONE}. "
+            "Always use the date written in the document. "
+            f"Today is {today} — use it only to resolve relative expressions like 'tomorrow' or 'next Monday', never as the event date unless the document explicitly says so. "
             "Use event types: meeting, flight, appointment, other. "
             "Use type flight for boarding passes, flight tickets, and itineraries. "
-            "Each event must have: type, confidence, source_pages, source_text, "
-            "missing_fields, google_event. "
+            "Each event must have: type, confidence, source_pages, source_text, missing_fields, google_event. "
             "source_pages must always be an array of page numbers. "
-            "Keep source_text short; quote only the source lines needed to justify the event. "
-            "google_event must have: summary, description, location, start, end, "
-            "attendees, reminders. start/end must have dateTime and timeZone. "
-            "attendees must contain objects with email and optional displayName. "
-            "reminders must be {\"useDefault\": true}. "
-            "Do not create Google Meet conferenceData. If an existing meeting URL is present, "
-            "place it in location or description.\n\n"
+            "source_text must be under 200 chars; quote only the key lines (flight number, date, time, route) needed to justify the event. "
+            "google_event must have: summary, description, location, start, end, attendees, reminders. "
+            'start and end must be JSON objects: {"dateTime": "<RFC3339>", "timeZone": "<IANA>"}. '
+            "Never use a bare string for start or end. "
+            "attendees must be [] unless real named people with real email addresses appear explicitly in the document — never fabricate or infer email addresses from boilerplate, disclaimers, or signatures. "
+            'reminders must be {"useDefault": true}. '
+            "Do not create Google Meet conferenceData. If an existing meeting URL is present, place it in location or description.\n\n"
             f"Today: {today}\n"
             f"File: {file_name}\n"
             f"Candidate pages: {page_hint}\n\n"

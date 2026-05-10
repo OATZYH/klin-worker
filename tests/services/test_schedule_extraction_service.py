@@ -101,11 +101,20 @@ def _fenced_array_payload() -> str:
 ```"""
 
 
+def _reminders_array_payload() -> str:
+    payload = json.loads(_meeting_payload())
+    payload["events"][0]["google_event"]["reminders"] = [{"useDefault": True}]
+    return json.dumps(payload)
+
+
 def test_extract_meeting_event_from_candidate_page() -> None:
     calls: list[str] = []
+    response_format: dict[str, object] = {}
 
     async def fake_achat(messages, **kwargs) -> str:
+        nonlocal response_format
         calls.append(messages[0]["content"])
+        response_format = kwargs["response_format"]
         return _meeting_payload()
 
     async def run() -> None:
@@ -132,6 +141,7 @@ def test_extract_meeting_event_from_candidate_page() -> None:
         assert event.google_event.start.dateTime == "2026-05-10T14:00:00+07:00"
         assert event.google_event.attendees[0].email == "person@example.com"
         assert calls
+        assert response_format["type"] == "json_schema"
 
     asyncio.run(run())
 
@@ -278,6 +288,88 @@ def test_fenced_top_level_array_is_repaired_and_source_pages_normalized() -> Non
         assert result.error is None
         assert result.events[0].type == "flight"
         assert result.events[0].source_pages == [1]
+
+    asyncio.run(run())
+
+
+def test_reminders_array_is_normalized_to_google_reminders_object() -> None:
+    async def fake_achat(*args, **kwargs) -> str:
+        return _reminders_array_payload()
+
+    async def run() -> None:
+        original_achat = llm_client.achat
+        llm_client.achat = fake_achat
+        try:
+            result = await ScheduleExtractionService().extract(
+                file_path="/tmp/meeting.pdf",
+                content_list=[
+                    {
+                        "type": "text",
+                        "text": "Meeting agenda on 2026-05-10 at 14:00",
+                        "page_idx": 1,
+                    }
+                ],
+            )
+        finally:
+            llm_client.achat = original_achat
+
+        assert len(result.events) == 1
+        assert result.error is None
+        assert result.events[0].google_event.reminders.useDefault is True
+
+    asyncio.run(run())
+
+
+def test_langfuse_shaped_incomplete_json_still_reports_parse_context() -> None:
+    raw = (
+        '{"events":[{"type":"flight","confidence":100,"source_pages":[1],'
+        '"source_text":"Flight No: VZ101","missing_fields":[],'
+        '"google_event":{"summary":"Boarding Pass","description":"Passenger details",'
+        '"location":"VZ101","start":{"dateTime":"2026-05-10T07:10:00Z",'
+        '"timeZone":"Asia/Bangkok"},"end":{"dateTime":"2026-05-10T09:15:00Z",'
+        '"timeZone":"Asia/Bangkok"},"attendees":[],"reminders":{"useDefault":true}}]'
+    )
+    span_updates: list[dict[str, object]] = []
+
+    async def fake_achat(*args, **kwargs) -> str:
+        return raw
+
+    def fake_update_current_span(**kwargs) -> None:
+        span_updates.append(kwargs)
+
+    async def run() -> None:
+        original_achat = llm_client.achat
+        original_update_current_span = schedule_module.update_current_span
+        llm_client.achat = fake_achat
+        schedule_module.update_current_span = fake_update_current_span
+        try:
+            result = await ScheduleExtractionService().extract(
+                file_path="/tmp/boarding-pass.pdf",
+                content_list=[
+                    {
+                        "type": "text",
+                        "text": "Flight VZ101 from CNX to BKK on 2026-05-10 boarding 07:10",
+                        "page_idx": 1,
+                    }
+                ],
+            )
+        finally:
+            llm_client.achat = original_achat
+            schedule_module.update_current_span = original_update_current_span
+
+        assert result.events == []
+        assert result.error == "Schedule extraction returned invalid JSON."
+        error_outputs = [
+            update["output"]
+            for update in span_updates
+            if isinstance(update.get("output"), dict)
+            and update["output"].get("error") == "invalid_json"
+        ]
+        assert error_outputs
+        parse_error = error_outputs[-1]["parse_error"]
+        assert parse_error["type"] == "JSONDecodeError"
+        assert "raw_prefix" in parse_error
+        assert "raw_suffix" in parse_error
 
     asyncio.run(run())
 

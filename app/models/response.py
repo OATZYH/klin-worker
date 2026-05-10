@@ -44,6 +44,60 @@ class SelectedCategoryScoreResponse(BaseModel):
 
 # ── Schedule Extraction ─────────────────────────────────────────────────
 
+# JSON contract when `OrganizeFileResult.schedule` is present:
+
+# Type shape:
+# {
+#   "events": [
+#     {
+#       "type": "meeting" | "flight" | "appointment" | "other",
+#       "confidence": number,                 # 0.0 to 1.0
+#       "source_pages": number[],
+#       "source_text": string,
+#       "missing_fields": string[],
+#       "google_event": {
+#         "summary": string,
+#         "description": string | null,
+#         "location": string | null,
+#         "start": {"dateTime": string, "timeZone": string | null},
+#         "end": {"dateTime": string, "timeZone": string | null},
+#         "attendees": [{"email": string, "displayName": string | null}],
+#         "reminders": {"useDefault": boolean}
+#       } | null
+#     }
+#   ],
+#   "error": string | null
+# }
+
+# Example:
+# {
+#   "events": [
+#     {
+#       "type": "meeting",
+#       "confidence": 1.0,
+#       "source_pages": [1],
+#       "source_text": "Interview Details: Date: Friday, 15 May 2026 Time: 10:30 AM Format: Online Interview via Microsoft Teams Duration: Approximately 1 hour",
+#       "missing_fields": [],
+#       "google_event": {
+#         "summary": "Full Stack Developer Interview with Emily Carter",
+#         "description": "Full-stack development concepts problem-solving approach team discussion",
+#         "location": "BrightEdge Technology",
+#         "start": {
+#           "dateTime": "2026-05-15T10:30:00Z",
+#           "timeZone": "Asia/Bangkok"
+#         },
+#         "end": {
+#           "dateTime": "2026-05-15T11:30:00Z",
+#           "timeZone": "Asia/Bangkok"
+#         },
+#         "attendees": [],
+#         "reminders": {"useDefault": true}
+#       }
+#     }
+#   ],
+#   "error": null
+# }
+
 
 class GoogleCalendarDateTimeResponse(BaseModel):
     """Google Calendar event date/time payload prepared for frontend insertion."""
@@ -87,7 +141,7 @@ class ScheduleEventCandidate(BaseModel):
     source_pages: list[int] = Field(default_factory=list)
     source_text: str = ""
     missing_fields: list[str] = Field(default_factory=list)
-    google_event: GoogleCalendarEventDraftResponse
+    google_event: GoogleCalendarEventDraftResponse | None = None
 
 
 class ScheduleExtractionResponse(BaseModel):

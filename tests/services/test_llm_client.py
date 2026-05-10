@@ -54,6 +54,59 @@ def test_achat_disables_thinking_in_chat_requests() -> None:
     asyncio.run(run())
 
 
+def test_achat_passes_response_format_to_chat_request() -> None:
+    async def run() -> None:
+        captured_body: dict[str, object] = {}
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            },
+        }
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal captured_body
+            captured_body = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": '{"value":"ok"}',
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+
+        client = LlmClient()
+        client._chat_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            base_url="http://testserver",
+        )
+
+        try:
+            result = await client.achat(
+                [{"role": "user", "content": "return json"}],
+                response_format=response_format,
+            )
+        finally:
+            await client._chat_client.aclose()
+
+        assert result == '{"value":"ok"}'
+        assert captured_body["response_format"] == response_format
+
+    asyncio.run(run())
+
+
 def test_aembed_rejects_unexpected_embedding_dimension() -> None:
     async def run() -> None:
         original_dim = settings.embedding_dim_size
