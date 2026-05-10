@@ -16,6 +16,7 @@ import json
 import logging
 import queue
 import threading
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Iterator
@@ -25,6 +26,7 @@ import httpx
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.observability.tracing import (
+    is_trace_text_payload_suppressed,
     observe,
     sanitize_for_trace,
     sanitize_messages,
@@ -53,6 +55,9 @@ class LlmClient:
         self._chat_server_reachable: bool = False
         self._embed_server_reachable: bool = False
         self._model_id: str = ""
+        self._request_semaphore = asyncio.Semaphore(
+            max(1, settings.llama_max_concurrent_requests)
+        )
 
     @staticmethod
     def _truncate_text_value(value: str, max_chars: int) -> str:
@@ -81,6 +86,31 @@ class LlmClient:
                         if isinstance(text_value, str):
                             part["text"] = self._truncate_text_value(text_value, max_chars)
         return guarded_messages
+
+    @staticmethod
+    def _truncate_embedding_text_value(value: str, max_tokens: int) -> str:
+        """Apply a conservative token-like guard for llama-server embedding input."""
+        if max_tokens <= 0 or not value:
+            return value
+
+        parts = value.split()
+        if len(parts) > max_tokens:
+            return " ".join(parts[:max_tokens])
+
+        max_chars = max_tokens * 4
+        if len(value) > max_chars:
+            return value[:max_chars]
+        return value
+
+    def _apply_embedding_input_guard(self, texts: list[str]) -> list[str]:
+        """Trim embedding inputs to stay below the embedding server physical batch."""
+        max_tokens = settings.rag_chunk_token_size
+        if max_tokens <= 0:
+            return texts
+        return [
+            self._truncate_embedding_text_value(str(text), max_tokens)
+            for text in texts
+        ]
 
     @staticmethod
     def _chat_template_kwargs() -> dict[str, bool]:
@@ -182,7 +212,8 @@ class LlmClient:
         update_current_span(metadata={"server": settings.llama_server_url})
 
         try:
-            resp = await self._chat_client.get("/models", timeout=10.0)  # type: ignore[union-attr]
+            async with self._request_slot():
+                resp = await self._chat_client.get("/models", timeout=10.0)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
             # Support both OpenAI-compat {"data": [...]} and llama-server {"models": [...]}
@@ -238,15 +269,22 @@ class LlmClient:
             await self.ensure_general_available()
 
         try:
-            resp = await self._embed_client.post(  # type: ignore[union-attr]
-                "/embeddings",
-                json={"input": ["health-check"]},
-                timeout=15.0,
-            )
+            async with self._request_slot():
+                resp = await self._embed_client.post(  # type: ignore[union-attr]
+                    "/embeddings",
+                    json={"input": ["health-check"]},
+                    timeout=15.0,
+                )
             resp.raise_for_status()
+            vectors = self._parse_embedding_response(resp.json())
+            self._validate_embedding_dimensions(vectors)
             self._embed_server_reachable = True
             self._embeddings_supported = True
             update_current_span(output={"embeddings_supported": True})
+        except AiCapabilityUnavailableError:
+            self._embed_server_reachable = False
+            self._embeddings_supported = False
+            raise
         except Exception as exc:
             self._embed_server_reachable = False
             self._embeddings_supported = False
@@ -264,6 +302,8 @@ class LlmClient:
         *,
         temperature: float = 0.3,
         max_tokens: int | None = None,
+        trace_name: str | None = None,
+        trace_metadata: Any = None,
     ) -> str:
         """
         Run a chat completion via the llama-server ``/chat/completions`` endpoint.
@@ -280,6 +320,8 @@ class LlmClient:
         )
         update_current_generation(
             input={"messages": sanitize_messages(guarded_messages)},
+            name=trace_name,
+            metadata=trace_metadata,
             model=self._model_id or None,
             model_parameters={
                 "temperature": temperature,
@@ -289,7 +331,8 @@ class LlmClient:
         )
 
         try:
-            resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+            async with self._request_slot():
+                resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
             self._chat_server_reachable = True
@@ -382,49 +425,50 @@ class LlmClient:
             },
         ):
             try:
-                async with self._chat_client.stream(  # type: ignore[union-attr]
-                    "POST",
-                    "/chat/completions",
-                    json=body,
-                ) as resp:
-                    resp.raise_for_status()
-                    self._chat_server_reachable = True
+                async with self._request_slot():
+                    async with self._chat_client.stream(  # type: ignore[union-attr]
+                        "POST",
+                        "/chat/completions",
+                        json=body,
+                    ) as resp:
+                        resp.raise_for_status()
+                        self._chat_server_reachable = True
 
-                    async for raw_line in resp.aiter_lines():
-                        line = raw_line.strip()
-                        if not line:
-                            continue
+                        async for raw_line in resp.aiter_lines():
+                            line = raw_line.strip()
+                            if not line:
+                                continue
 
-                        payload = line
-                        if payload.startswith("data:"):
-                            payload = payload[len("data:"):].strip()
+                            payload = line
+                            if payload.startswith("data:"):
+                                payload = payload[len("data:"):].strip()
 
-                        if payload == "[DONE]":
-                            break
+                            if payload == "[DONE]":
+                                break
 
-                        try:
-                            data = json.loads(payload)
-                        except json.JSONDecodeError:
-                            continue
+                            try:
+                                data = json.loads(payload)
+                            except json.JSONDecodeError:
+                                continue
 
-                        choices = data.get("choices", [])
-                        if not choices:
-                            continue
+                            choices = data.get("choices", [])
+                            if not choices:
+                                continue
 
-                        first_choice = choices[0]
-                        delta = first_choice.get("delta") or {}
-                        content = delta.get("content")
+                            first_choice = choices[0]
+                            delta = first_choice.get("delta") or {}
+                            content = delta.get("content")
 
-                        if not content:
-                            message = first_choice.get("message") or {}
-                            content = message.get("content")
+                            if not content:
+                                message = first_choice.get("message") or {}
+                                content = message.get("content")
 
-                        if isinstance(content, str) and content:
-                            aggregated.append(content)
-                            if first_token_at is None:
-                                first_token_at = datetime.now(timezone.utc)
-                                update_current_generation(completion_start_time=first_token_at)
-                            yield content
+                            if isinstance(content, str) and content:
+                                aggregated.append(content)
+                                if first_token_at is None:
+                                    first_token_at = datetime.now(timezone.utc)
+                                    update_current_generation(completion_start_time=first_token_at)
+                                yield content
 
                 update_current_generation(
                     output={
@@ -466,43 +510,67 @@ class LlmClient:
                 max_tokens=max_tokens,
             )
 
-        try:
-            guarded_messages = self._apply_input_char_guard(messages)
-            requested_max_tokens = max_tokens or settings.llm_output_max_tokens
-            update_current_generation(
-                input={"messages": sanitize_messages(guarded_messages)},
-                model=self._model_id or None,
-                model_parameters={
-                    "temperature": temperature,
-                    "max_tokens": requested_max_tokens,
-                    "enable_thinking": False,
-                    "vision": True,
-                },
-            )
-            body = self._build_chat_request_body(
-                guarded_messages,
-                temperature=temperature,
-                max_tokens=requested_max_tokens,
-            )
-            resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
-            resp.raise_for_status()
-            data = resp.json()
-            self._chat_server_reachable = True
-            content = data["choices"][0]["message"]["content"].strip()
-            update_current_generation(output=content)
-            return content
-        except AiCapabilityUnavailableError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Vision chat failed — falling back to text-only. (%s)", exc
-            )
-            self._vision_supported = False
-            return await self.achat(
-                self._strip_images(messages),
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+        guarded_messages = self._apply_input_char_guard(messages)
+        requested_max_tokens = max_tokens or settings.llm_output_max_tokens
+        update_current_generation(
+            input={"messages": sanitize_messages(guarded_messages)},
+            model=self._model_id or None,
+            model_parameters={
+                "temperature": temperature,
+                "max_tokens": requested_max_tokens,
+                "enable_thinking": False,
+                "vision": True,
+            },
+        )
+        body = self._build_chat_request_body(
+            guarded_messages,
+            temperature=temperature,
+            max_tokens=requested_max_tokens,
+        )
+
+        # Retry once on transport errors (ReadError/RemoteProtocolError) — these
+        # happen when llama-server closes a stale keep-alive connection before
+        # the large vision payload is read. A fresh connection always succeeds.
+        for attempt in range(2):
+            try:
+                async with self._request_slot():
+                    resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
+                resp.raise_for_status()
+                data = resp.json()
+                self._chat_server_reachable = True
+                content = data["choices"][0]["message"]["content"].strip()
+                update_current_generation(output=content)
+                return content
+            except AiCapabilityUnavailableError:
+                raise
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (400, 415, 422):
+                    # Model definitively rejects vision — disable for session
+                    logger.warning("Vision rejected by model (HTTP %s), disabling. (%s)", exc.response.status_code, exc)
+                    self._vision_supported = False
+                    update_current_generation(
+                        level="WARNING",
+                        status_message=f"Vision not supported (HTTP {exc.response.status_code}) — falling back to text-only (no image sent)",
+                    )
+                    return await self.achat(
+                        self._strip_images(messages),
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                # Non-retryable HTTP error
+                logger.warning("Vision chat failed (HTTP %s). (%s)", exc.response.status_code, exc)
+                raise
+            except (httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                # Stale keep-alive connection dropped by server — retry once on fresh connection
+                if attempt == 0:
+                    logger.warning("Vision chat transport error (attempt %d), retrying. (%s)", attempt + 1, exc)
+                    continue
+                logger.warning("Vision chat transport error after retry. (%s)", exc)
+                raise
+            except Exception as exc:
+                # Other transient error — don't permanently disable vision
+                logger.warning("Vision chat failed (transient). (%s)", exc)
+                raise
 
     @property
     def supports_vision(self) -> bool:
@@ -554,21 +622,32 @@ class LlmClient:
         """
         self._assert_embedding_client_started()
 
-        body: dict[str, Any] = {"input": texts}
+        guarded_texts = self._apply_embedding_input_guard(texts)
+        body: dict[str, Any] = {"input": guarded_texts}
+        trace_texts: Any = "[SUPPRESSED]" if is_trace_text_payload_suppressed() else guarded_texts
         with start_as_current_observation(
             name="llm.embed",
             as_type="embedding",
-            input={"texts": sanitize_for_trace(texts), "text_count": len(texts)},
+            input={"texts": sanitize_for_trace(trace_texts), "text_count": len(guarded_texts)},
             model="llama-embedding-server",
+            metadata={
+                "rag_chunk_token_size": settings.rag_chunk_token_size,
+            },
         ) as observation:
             try:
-                resp = await self._embed_client.post("/embeddings", json=body)  # type: ignore[union-attr]
+                async with self._request_slot():
+                    resp = await self._embed_client.post("/embeddings", json=body)  # type: ignore[union-attr]
                 resp.raise_for_status()
-                resp_json = resp.json()
-                # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper
-                data = resp_json if isinstance(resp_json, list) else resp_json["data"]
+                pooled = self._parse_embedding_response(resp.json())
+                self._validate_embedding_dimensions(pooled)
                 self._embed_server_reachable = True
                 self._embeddings_supported = True
+            except AiCapabilityUnavailableError as exc:
+                self._embed_server_reachable = False
+                self._embeddings_supported = False
+                if observation is not None:
+                    observation.update(level="ERROR", status_message=str(exc))
+                raise
             except Exception as exc:
                 self._embed_server_reachable = False
                 self._embeddings_supported = False
@@ -579,25 +658,52 @@ class LlmClient:
                     "Embedding AI is unavailable because llama-server cannot complete embedding requests.",
                 ) from exc
 
-            pooled: list[list[float]] = []
-            for item in data:
-                emb = item["embedding"]
-                if emb and isinstance(emb[0], list):
-                    n_tokens = len(emb)
-                    dim = len(emb[0])
-                    avg = [
-                        sum(emb[t][d] for t in range(n_tokens)) / n_tokens
-                        for d in range(dim)
-                    ]
-                    pooled.append(avg)
-                else:
-                    pooled.append(emb)
-
             if observation is not None:
                 observation.update(output={"vector_count": len(pooled)})
             return pooled
 
     # ── Internals ────────────────────────────────────────────────────────
+
+    @asynccontextmanager
+    async def _request_slot(self) -> AsyncIterator[None]:
+        """Limit total llama-server HTTP concurrency across chat, vision, and embeddings."""
+        async with self._request_semaphore:
+            yield
+
+    @staticmethod
+    def _parse_embedding_response(resp_json: Any) -> list[list[float]]:
+        """Normalize llama-server/OpenAI embedding response shapes."""
+        # llama-server may return a plain list or the OpenAI-compat {"data": [...]} wrapper.
+        data = resp_json if isinstance(resp_json, list) else resp_json["data"]
+
+        pooled: list[list[float]] = []
+        for item in data:
+            emb = item["embedding"]
+            if emb and isinstance(emb[0], list):
+                n_tokens = len(emb)
+                dim = len(emb[0])
+                avg = [
+                    sum(emb[t][d] for t in range(n_tokens)) / n_tokens
+                    for d in range(dim)
+                ]
+                pooled.append(avg)
+            else:
+                pooled.append(emb)
+        return pooled
+
+    @staticmethod
+    def _validate_embedding_dimensions(vectors: list[list[float]]) -> None:
+        expected_dim = settings.embedding_dim_size
+        mismatched = [len(vector) for vector in vectors if len(vector) != expected_dim]
+        if mismatched:
+            actual_dim = mismatched[0]
+            raise AiCapabilityUnavailableError(
+                "embedding",
+                "Embedding AI returned vectors with dimension "
+                f"{actual_dim}, but KLIN_EMBEDDING_DIM_SIZE is {expected_dim}. "
+                "Use the matching embedding model/config and rebuild category "
+                "embeddings plus RAG storage.",
+            )
 
     def _assert_chat_client_started(self) -> None:
         if self._chat_client is None:

@@ -14,6 +14,7 @@ manage a separate vector store.
 LLM backend: llama-server (out-of-process, managed by Tauri).
 """
 
+import base64
 from dataclasses import fields
 import logging
 from pathlib import Path
@@ -28,6 +29,23 @@ from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_image_mime(b64_data: str) -> str:
+    """Detect image MIME type from base64 magic bytes; falls back to image/jpeg."""
+    try:
+        raw = base64.b64decode(b64_data[:16] + "==")
+        if raw[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        if raw[:3] == b'\xff\xd8\xff':
+            return "image/jpeg"
+        if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+            return "image/webp"
+        if raw[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+    except Exception:
+        pass
+    return "image/jpeg"
 
 
 def _sanitize_doc_status_record(doc_id: str, record: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -89,6 +107,57 @@ async def ensure_rag_doc_status_compatible(rag_engine: Any) -> int:
         dropped_keys,
     )
     return len(updates)
+
+
+async def configure_lightrag_for_file_search(rag_engine: Any) -> Any:
+    """Initialize LightRAG and apply local file-search defaults."""
+    if hasattr(rag_engine, "_ensure_lightrag_initialized"):
+        init_result = await rag_engine._ensure_lightrag_initialized()  # noqa: SLF001
+        if isinstance(init_result, dict) and not init_result.get("success", False):
+            error = init_result.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(str(error))
+
+    lightrag = getattr(rag_engine, "lightrag", None)
+    if lightrag is not None and not settings.rag_enable_kg_extraction:
+        _disable_lightrag_kg_extraction(lightrag)
+        _disable_raganything_kg_extraction(rag_engine)
+    return lightrag
+
+
+def _disable_lightrag_kg_extraction(lightrag: Any) -> None:
+    """Disable KG extraction while preserving full-doc and chunk vector indexing."""
+    if getattr(lightrag, "_klin_kg_extraction_disabled", False):
+        return
+
+    async def _skip_extract_entities(
+        chunk: dict[str, Any],
+        pipeline_status: Any = None,
+        pipeline_status_lock: Any = None,
+    ) -> list[Any]:
+        return []
+
+    lightrag._process_extract_entities = _skip_extract_entities  # noqa: SLF001
+    lightrag._klin_kg_extraction_disabled = True  # noqa: SLF001
+    logger.info("LightRAG KG extraction disabled for local file-search ingestion.")
+
+
+def _disable_raganything_kg_extraction(rag_engine: Any) -> None:
+    """Disable RAGAnything's multimodal KG extraction path."""
+    if getattr(rag_engine, "_klin_multimodal_kg_extraction_disabled", False):
+        return
+    if not hasattr(rag_engine, "_batch_extract_entities_lightrag_style_type_aware"):
+        return
+
+    async def _skip_multimodal_extract_entities(
+        lightrag_chunks: dict[str, Any],
+    ) -> list[Any]:
+        return []
+
+    rag_engine._batch_extract_entities_lightrag_style_type_aware = (  # noqa: SLF001
+        _skip_multimodal_extract_entities
+    )
+    rag_engine._klin_multimodal_kg_extraction_disabled = True  # noqa: SLF001
+    logger.info("RAGAnything multimodal KG extraction disabled for file-search ingestion.")
 
 
 def _coerce_positive_int(value: Any) -> int | None:
@@ -160,6 +229,11 @@ class RagService:
                 working_dir=str(working_dir),
                 parse_method="auto",
                 parser="docling",
+                content_format=settings.rag_content_format,
+                use_full_path=True,
+                enable_image_processing=settings.rag_enable_image_processing,
+                enable_table_processing=settings.rag_enable_table_processing,
+                enable_equation_processing=settings.rag_enable_equation_processing,
             )
 
             # Keep a reference to the raw embed callable for embed_texts()
@@ -171,8 +245,8 @@ class RagService:
 
             # Embedding function configured for llama-server
             embedding_func = EmbeddingFunc(
-                embedding_dim=settings.embedding_dim,
-                max_token_size=settings.rag_embedding_input_max_tokens,
+                embedding_dim=settings.embedding_dim_size,
+                max_token_size=settings.rag_chunk_token_size,
                 func=_embed,
             )
 
@@ -216,7 +290,7 @@ class RagService:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{image_data}",
+                                "url": f"data:{_detect_image_mime(image_data)};base64,{image_data}",
                             },
                         },
                     ]
@@ -246,6 +320,11 @@ class RagService:
                 lightrag_kwargs={
                     "embedding_func_max_async": 1,
                     "llm_model_max_async": 1,
+                    "chunk_token_size": settings.rag_chunk_token_size,
+                    "chunk_overlap_token_size": 64,
+                    "embedding_batch_num": 1,
+                    "max_parallel_insert": 1,
+                    "default_embedding_timeout": settings.rag_embedding_timeout_seconds,
                 },
             )
             self._ready = True
@@ -253,7 +332,7 @@ class RagService:
             logger.info(
                 "RAG-Anything initialised  →  %s  (embd_dim: %d)",
                 working_dir,
-                settings.embedding_dim,
+                settings.embedding_dim_size,
             )
         except Exception as exc:
             logger.error("Failed to initialise RAG-Anything: %s", exc)

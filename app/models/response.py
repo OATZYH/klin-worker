@@ -3,7 +3,7 @@ Response models for the Klin-Worker API.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -42,6 +42,61 @@ class SelectedCategoryScoreResponse(BaseModel):
     score: float | None = Field(default=None, description="Confidence percentage (0-100)")
 
 
+# ── Schedule Extraction ─────────────────────────────────────────────────
+
+
+class GoogleCalendarDateTimeResponse(BaseModel):
+    """Google Calendar event date/time payload prepared for frontend insertion."""
+
+    dateTime: str
+    timeZone: str | None = None
+
+
+class GoogleCalendarAttendeeResponse(BaseModel):
+    """Google Calendar attendee payload."""
+
+    email: str
+    displayName: str | None = None
+
+
+class GoogleCalendarRemindersResponse(BaseModel):
+    """Google Calendar reminders payload."""
+
+    useDefault: bool = True
+
+
+class GoogleCalendarEventDraftResponse(BaseModel):
+    """Google Calendar-like event body returned as a local draft only."""
+
+    summary: str
+    description: str | None = None
+    location: str | None = None
+    start: GoogleCalendarDateTimeResponse
+    end: GoogleCalendarDateTimeResponse
+    attendees: list[GoogleCalendarAttendeeResponse] = Field(default_factory=list)
+    reminders: GoogleCalendarRemindersResponse = Field(
+        default_factory=GoogleCalendarRemindersResponse
+    )
+
+
+class ScheduleEventCandidate(BaseModel):
+    """Single schedule candidate extracted from a file."""
+
+    type: Literal["meeting", "flight", "appointment", "other"] = "other"
+    confidence: float = Field(ge=0, le=1)
+    source_pages: list[int] = Field(default_factory=list)
+    source_text: str = ""
+    missing_fields: list[str] = Field(default_factory=list)
+    google_event: GoogleCalendarEventDraftResponse
+
+
+class ScheduleExtractionResponse(BaseModel):
+    """Best-effort schedule extraction result for one file."""
+
+    events: list[ScheduleEventCandidate] = Field(default_factory=list)
+    error: str | None = None
+
+
 # ── Organize ─────────────────────────────────────────────────────────────
 
 
@@ -52,6 +107,11 @@ class OrganizeFileResult(BaseModel):
     suggested_names: list[str] = Field(default_factory=list)
     categories: list[CategoryScoreResponse]
     error: Optional[str] = None
+    schedule: ScheduleExtractionResponse | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Optional Google Calendar-like event drafts extracted from the file.",
+    )
 
 
 class OrganizeResponse(BaseModel):
@@ -179,6 +239,9 @@ class FileSearchResponse(BaseModel):
     """Response for POST /api/search/files."""
 
     results: list[FileSearchResultItem]
+    semantic_status: Literal["ready", "pending", "degraded", "not_ready"] = "ready"
+    semantic_error: str | None = None
+    indexing_pending_count: int = 0
 
 
 # ── Notes ────────────────────────────────────────────────────────────────

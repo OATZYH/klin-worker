@@ -1,0 +1,25 @@
+meta {
+  name: Search Files
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/search/files
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+  //   "query": "{{searchQuery}}"
+  //   "query": "ultra-high-resolution inputs"
+  //   "query": "llm"
+    "query": "cat"
+  //   "query":"deepseek"
+  }
+}

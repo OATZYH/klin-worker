@@ -13,10 +13,11 @@ FastAPI application entry point.
 """
 
 import logging
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -278,6 +279,8 @@ def _feature_tag(path: str) -> str:
         return "organize"
     if path.startswith("/api/summary"):
         return "summary"
+    if path.startswith("/api/search"):
+        return "search"
     if path.startswith("/api/history"):
         return "history"
     if path.startswith("/api/settings"):
@@ -285,6 +288,24 @@ def _feature_tag(path: str) -> str:
     if path.startswith("/health"):
         return "health"
     return "api"
+
+
+def _request_trace_input(method: str, path: str, query_params: dict[str, str], body: bytes | None = None) -> dict[str, Any]:
+    trace_input: dict[str, Any] = {
+        "method": method,
+        "path": path,
+        "query_params": query_params,
+    }
+    if method == "POST" and path == "/api/search/files" and body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            trace_input["body_parse_error"] = True
+            return trace_input
+
+        if isinstance(payload, dict) and isinstance(payload.get("query"), str):
+            trace_input["body"] = {"query": payload["query"]}
+    return trace_input
 
 
 @app.middleware("http")
@@ -299,16 +320,13 @@ async def langfuse_request_middleware(request: Request, call_next):
     trace_id = create_trace_id(seed=f"{method}:{path}:{perf_counter()}")
     request_token = set_current_request_trace_id(trace_id)
     request.state.langfuse_trace_id = trace_id
+    request_body = await request.body() if method == "POST" and path == "/api/search/files" else None
 
     with start_as_current_observation(
         name=trace_name,
         as_type="span",
         trace_context={"trace_id": trace_id} if trace_id else None,
-        input={
-            "method": method,
-            "path": path,
-            "query": dict(request.query_params),
-        },
+        input=_request_trace_input(method, path, dict(request.query_params), request_body),
         metadata={
             "feature": feature,
             "component": "fastapi",

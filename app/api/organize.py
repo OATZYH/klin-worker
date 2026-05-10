@@ -46,6 +46,7 @@ from app.services.history_service import HistoryService
 from app.services.ai.rag_service import RagService
 from app.services.organize.organize_pipeline import build_locked_result, process_single_file
 from app.services.organize.rename_service import RenameService
+from app.services.organize.schedule_extraction_service import ScheduleExtractionService
 from app.services.organize.scanner_service import ScannerService
 from app.services.summary.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
@@ -85,6 +86,10 @@ def _get_ingest_worker() -> BackgroundIngestWorker:
 
 def _get_rename() -> RenameService:
     return RenameService()
+
+
+def _get_schedule_extraction() -> ScheduleExtractionService:
+    return ScheduleExtractionService()
 
 
 def _get_history() -> HistoryService:
@@ -183,6 +188,7 @@ async def organize_files(
     classifier: ClassificationService = Depends(_get_classifier),
     summary_svc: SummaryService = Depends(_get_summary),
     rename_svc: RenameService = Depends(_get_rename),
+    schedule_svc: ScheduleExtractionService = Depends(_get_schedule_extraction),
     history_svc: HistoryService = Depends(_get_history),
     system_log_svc: SystemLogService = Depends(_get_system_log),
     lock_svc: LockSettingsService = Depends(_get_lock_settings_service),
@@ -229,6 +235,7 @@ async def organize_files(
             classifier=classifier,
             summary_svc=summary_svc,
             rename_svc=rename_svc,
+            schedule_svc=schedule_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
             ingest=ingest,
