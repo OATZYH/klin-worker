@@ -17,9 +17,10 @@ import logging
 import queue
 import threading
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Iterator
+from typing import Any, AsyncIterator, Iterator, Literal
 
 import httpx
 
@@ -36,6 +37,56 @@ from app.observability.tracing import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Callers that run on behalf of background work (RAG ingest) set this
+# contextvar to "background" so their LLM calls yield to foreground requests.
+RequestPriority = Literal["foreground", "background"]
+request_priority_var: ContextVar[RequestPriority] = ContextVar(
+    "klin_request_priority", default="foreground"
+)
+
+
+class _PriorityGate:
+    """Per-endpoint semaphore that lets foreground requests pre-empt background ones.
+
+    Foreground requests acquire a slot directly. Background requests must
+    wait until no foreground is pending before they race for a slot. This
+    prevents background work from starving user-facing calls without
+    introducing a hard per-class slot reservation.
+    """
+
+    def __init__(self, slots: int) -> None:
+        slots = max(1, slots)
+        self._sem = asyncio.Semaphore(slots)
+        self._fg_pending = 0
+        self._no_fg = asyncio.Event()
+        self._no_fg.set()
+
+    @property
+    def foreground_pending(self) -> int:
+        return self._fg_pending
+
+    @asynccontextmanager
+    async def acquire(self, *, foreground: bool) -> AsyncIterator[None]:
+        if foreground:
+            self._fg_pending += 1
+            self._no_fg.clear()
+            try:
+                async with self._sem:
+                    yield
+            finally:
+                self._fg_pending -= 1
+                if self._fg_pending <= 0:
+                    self._fg_pending = 0
+                    self._no_fg.set()
+        else:
+            # Yield to any pending foreground request. Loop because a new
+            # foreground call may arrive between the wait and the acquire.
+            while self._fg_pending > 0:
+                await self._no_fg.wait()
+            async with self._sem:
+                yield
 
 
 class LlmClient:
@@ -55,9 +106,12 @@ class LlmClient:
         self._chat_server_reachable: bool = False
         self._embed_server_reachable: bool = False
         self._model_id: str = ""
-        self._request_semaphore = asyncio.Semaphore(
-            max(1, settings.llama_max_concurrent_requests)
-        )
+        # Chat and embed run as separate llama-server processes (different
+        # ports), so they should not artificially serialize against each
+        # other. Each gate also enforces foreground priority so background
+        # RAG ingest can never starve a user-facing request.
+        self._chat_gate = _PriorityGate(settings.llama_chat_concurrency)
+        self._embed_gate = _PriorityGate(settings.llama_embed_concurrency)
 
     @staticmethod
     def _truncate_text_value(value: str, max_chars: int) -> str:
@@ -215,7 +269,7 @@ class LlmClient:
         update_current_span(metadata={"server": settings.llama_server_url})
 
         try:
-            async with self._request_slot():
+            async with self._request_slot("chat"):
                 resp = await self._chat_client.get("/models", timeout=10.0)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
@@ -272,7 +326,7 @@ class LlmClient:
             await self.ensure_general_available()
 
         try:
-            async with self._request_slot():
+            async with self._request_slot("embed"):
                 resp = await self._embed_client.post(  # type: ignore[union-attr]
                     "/embeddings",
                     json={"input": ["health-check"]},
@@ -342,7 +396,7 @@ class LlmClient:
         )
 
         try:
-            async with self._request_slot():
+            async with self._request_slot("chat"):
                 resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
             resp.raise_for_status()
             data = resp.json()
@@ -448,7 +502,7 @@ class LlmClient:
             },
         ):
             try:
-                async with self._request_slot():
+                async with self._request_slot("chat"):
                     async with self._chat_client.stream(  # type: ignore[union-attr]
                         "POST",
                         "/chat/completions",
@@ -556,7 +610,7 @@ class LlmClient:
         # the large vision payload is read. A fresh connection always succeeds.
         for attempt in range(2):
             try:
-                async with self._request_slot():
+                async with self._request_slot("chat"):
                     resp = await self._chat_client.post("/chat/completions", json=body)  # type: ignore[union-attr]
                 resp.raise_for_status()
                 data = resp.json()
@@ -658,7 +712,7 @@ class LlmClient:
             },
         ) as observation:
             try:
-                async with self._request_slot():
+                async with self._request_slot("embed"):
                     resp = await self._embed_client.post("/embeddings", json=body)  # type: ignore[union-attr]
                 resp.raise_for_status()
                 pooled = self._parse_embedding_response(resp.json())
@@ -688,9 +742,18 @@ class LlmClient:
     # ── Internals ────────────────────────────────────────────────────────
 
     @asynccontextmanager
-    async def _request_slot(self) -> AsyncIterator[None]:
-        """Limit total llama-server HTTP concurrency across chat, vision, and embeddings."""
-        async with self._request_semaphore:
+    async def _request_slot(
+        self, endpoint: Literal["chat", "embed"]
+    ) -> AsyncIterator[None]:
+        """Acquire a concurrency slot on the chat or embed llama-server.
+
+        Reads the per-task priority from ``request_priority_var`` so
+        background callers can mark themselves as such without changing the
+        public API of ``achat`` / ``aembed``.
+        """
+        gate = self._chat_gate if endpoint == "chat" else self._embed_gate
+        foreground = request_priority_var.get() == "foreground"
+        async with gate.acquire(foreground=foreground):
             yield
 
     @staticmethod

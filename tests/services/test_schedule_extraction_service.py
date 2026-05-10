@@ -400,6 +400,8 @@ def test_schedule_extraction_timeout_returns_error_without_raising() -> None:
             schedule_module._SCHEDULE_LLM_TIMEOUT_SECONDS = original_timeout
 
         assert result.events == []
-        assert result.error == "Schedule extraction timed out."
+        # Schedule extraction now retries once on timeout before giving up,
+        # so the surfaced error message reflects the post-retry state.
+        assert result.error == "Schedule extraction timed out after retry."
 
     asyncio.run(run())

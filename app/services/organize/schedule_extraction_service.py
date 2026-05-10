@@ -34,7 +34,8 @@ _DEFAULT_TIMEZONE = "Asia/Bangkok"
 _MAX_CONTEXT_CHARS = 16_000
 _SMALL_DOCUMENT_CHARS = 8_000
 _SOURCE_TEXT_MAX_CHARS = 1_200
-_SCHEDULE_LLM_TIMEOUT_SECONDS = 60.0
+_SCHEDULE_LLM_TIMEOUT_SECONDS = 90.0
+_SCHEDULE_LLM_MAX_ATTEMPTS = 2  # one retry on transient timeout / 503
 
 _SCHEDULE_SIGNAL_RE = re.compile(
     r"("
@@ -115,43 +116,85 @@ class ScheduleExtractionService:
             source_pages=source_pages,
         )
 
-        try:
-            raw = await asyncio.wait_for(
-                llm_client.achat(
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    max_tokens=min(2048, settings.llm_output_max_tokens),
-                    trace_name="schedule.extract.llm",
-                    trace_metadata={
-                        "feature": "schedule_extraction",
-                        "file_name": Path(file_path).name,
-                        "source_pages": source_pages,
-                        "context_chars": len(context),
-                        "schema": "ScheduleExtractionResponse",
-                    },
-                    response_format=self._schedule_response_format(),
-                ),
-                timeout=_SCHEDULE_LLM_TIMEOUT_SECONDS,
+        # Retry once on transient failures (timeout / 503-style
+        # AiCapabilityUnavailableError). Schedule extraction is not
+        # latency-critical and a second shot on a freshly-released slot
+        # almost always succeeds when the first attempt was contended.
+        raw: str | None = None
+        last_error: BaseException | None = None
+        last_error_label = "timeout"
+        for attempt in range(1, _SCHEDULE_LLM_MAX_ATTEMPTS + 1):
+            try:
+                raw = await asyncio.wait_for(
+                    llm_client.achat(
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.1,
+                        max_tokens=min(2048, settings.llm_output_max_tokens),
+                        trace_name="schedule.extract.llm",
+                        trace_metadata={
+                            "feature": "schedule_extraction",
+                            "file_name": Path(file_path).name,
+                            "source_pages": source_pages,
+                            "context_chars": len(context),
+                            "schema": "ScheduleExtractionResponse",
+                            "attempt": attempt,
+                        },
+                        response_format=self._schedule_response_format(),
+                    ),
+                    timeout=_SCHEDULE_LLM_TIMEOUT_SECONDS,
+                )
+                break
+            except asyncio.TimeoutError as exc:
+                last_error = exc
+                last_error_label = "timeout"
+                logger.warning(
+                    "Schedule extraction timed out (attempt %d/%d) file=%s",
+                    attempt,
+                    _SCHEDULE_LLM_MAX_ATTEMPTS,
+                    file_path,
+                )
+                if attempt >= _SCHEDULE_LLM_MAX_ATTEMPTS:
+                    break
+            except AiCapabilityUnavailableError as exc:
+                last_error = exc
+                last_error_label = "ai_unavailable"
+                logger.warning(
+                    "Schedule extraction AI unavailable (attempt %d/%d) file=%s: %s",
+                    attempt,
+                    _SCHEDULE_LLM_MAX_ATTEMPTS,
+                    file_path,
+                    exc,
+                )
+                if attempt >= _SCHEDULE_LLM_MAX_ATTEMPTS:
+                    # Re-raise on final attempt — preserves outer pipeline's
+                    # AI-unavailable handling so it can early-return cleanly.
+                    raise
+            except Exception as exc:
+                logger.warning("Schedule extraction LLM call failed for %s: %s", file_path, exc)
+                update_current_span(
+                    output={"event_count": 0, "error": str(exc)},
+                    level="ERROR",
+                    status_message=str(exc),
+                )
+                return ScheduleExtractionResponse(events=[], error=str(exc))
+
+        if raw is None:
+            message = (
+                "Schedule extraction timed out after retry."
+                if last_error_label == "timeout"
+                else "Schedule extraction failed after retry."
             )
-        except AiCapabilityUnavailableError:
-            raise
-        except asyncio.TimeoutError:
-            message = "Schedule extraction timed out."
-            logger.warning("%s file=%s", message, file_path)
+            error_code = (
+                "timeout_after_retry"
+                if last_error_label == "timeout"
+                else "ai_unavailable_after_retry"
+            )
             update_current_span(
-                output={"event_count": 0, "error": "timeout"},
+                output={"event_count": 0, "error": error_code},
                 level="ERROR",
                 status_message=message,
             )
             return ScheduleExtractionResponse(events=[], error=message)
-        except Exception as exc:
-            logger.warning("Schedule extraction LLM call failed for %s: %s", file_path, exc)
-            update_current_span(
-                output={"event_count": 0, "error": str(exc)},
-                level="ERROR",
-                status_message=str(exc),
-            )
-            return ScheduleExtractionResponse(events=[], error=str(exc))
 
         try:
             payload = self._parse_json_payload(raw)

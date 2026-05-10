@@ -174,11 +174,14 @@ def test_aembed_truncates_inputs_to_embedding_budget() -> None:
 
 
 def test_llm_requests_are_serialized() -> None:
+    """Chat and embed run on physically separate llama-server processes
+    and now have independent semaphores, so they MUST be able to run
+    concurrently. The old behavior (single shared semaphore) artificially
+    serialized them, which caused background embed to block foreground
+    chat. This test now asserts the new behavior."""
     async def run() -> None:
         original_dim = settings.embedding_dim_size
-        original_max_concurrent = settings.llama_max_concurrent_requests
         settings.embedding_dim_size = 2
-        settings.llama_max_concurrent_requests = 1
         active_requests = 0
         max_active_requests = 0
 
@@ -227,10 +230,11 @@ def test_llm_requests_are_serialized() -> None:
             )
         finally:
             settings.embedding_dim_size = original_dim
-            settings.llama_max_concurrent_requests = original_max_concurrent
             await client._chat_client.aclose()
             await client._embed_client.aclose()
 
-        assert max_active_requests == 1
+        # Chat and embed live on separate llama-server processes; they must
+        # be able to overlap. With the old shared semaphore this was 1.
+        assert max_active_requests == 2
 
     asyncio.run(run())

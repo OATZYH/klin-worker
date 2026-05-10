@@ -59,16 +59,23 @@ class FakeRag:
 
 @dataclass
 class FakePreparedIngest:
-    ingest_status: str = "queued"
+    ingest_status: str = "deferred"
     extracted_text: str | None = "Meeting agenda on 2026-05-10 at 14:00"
     content_list: list[dict[str, Any]] | None = None
+    deferred_job: object | None = None
 
 
 class FakeIngest:
     def __init__(self, order: list[str]) -> None:
         self.order = order
 
-    async def prepare(self, filepath: str, trace_id: str | None = None) -> FakePreparedIngest:
+    async def prepare(
+        self,
+        filepath: str,
+        trace_id: str | None = None,
+        *,
+        enqueue_for_rag: bool = True,
+    ) -> FakePreparedIngest:
         self.order.append("ingest")
         return FakePreparedIngest(
             content_list=[
@@ -77,8 +84,13 @@ class FakeIngest:
                     "text": "Meeting agenda on 2026-05-10 at 14:00",
                     "page_idx": 1,
                 }
-            ]
+            ],
+            deferred_job=object(),
         )
+
+    async def enqueue_after_organize(self, prepared: FakePreparedIngest) -> str:
+        self.order.append("enqueue_after_organize")
+        return "queued"
 
 
 class FakeSchedule:

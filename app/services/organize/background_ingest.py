@@ -20,6 +20,7 @@ from app.observability.tracing import (
     start_as_current_observation,
     update_current_span,
 )
+from app.services.ai.llm_client import request_priority_var
 from app.services.ai.rag_service import (
     configure_lightrag_for_file_search,
     ensure_rag_doc_status_compatible,
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
 
-IngestStatus = Literal["queued", "queue_full", "skipped_image", "not_ready"]
+IngestStatus = Literal["queued", "queue_full", "skipped_image", "not_ready", "deferred"]
 TrackedIngestStatus = Literal[
     "queued",
     "processing",
@@ -39,6 +40,7 @@ TrackedIngestStatus = Literal[
     "skipped_image",
     "not_ready",
     "queue_full",
+    "deferred",
 ]
 
 
@@ -54,11 +56,17 @@ class IngestState:
 
 @dataclass(frozen=True, slots=True)
 class PreparedIngestResult:
-    """Request-local parse result reused by the organize pipeline."""
+    """Request-local parse result reused by the organize pipeline.
+
+    When ``ingest_status == "deferred"``, ``deferred_job`` carries the
+    ``IngestJob`` that should be handed to ``enqueue_after_organize`` once
+    the foreground organize pipeline finishes.
+    """
 
     ingest_status: IngestStatus
     extracted_text: str | None = None
     content_list: list[dict[str, Any]] | None = None
+    deferred_job: "IngestJob | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,27 +135,42 @@ class BackgroundIngestWorker:
         *,
         enqueue_for_rag: bool = True,
     ) -> PreparedIngestResult:
-        """Prepare request-local summary text and optionally queue background ingest."""
+        """Prepare request-local summary text and optionally queue background ingest.
+
+        When ``enqueue_for_rag=False`` the parse still runs (the foreground
+        pipeline needs ``content_list`` and ``extracted_text``) but the RAG
+        job is NOT enqueued. Instead a ready-to-enqueue ``IngestJob`` is
+        attached as ``deferred_job`` and the caller is expected to invoke
+        ``enqueue_after_organize`` once foreground work completes. This keeps
+        the background worker out of the LLM slot while user-visible
+        summary/rename/classify/schedule extraction is in flight.
+        """
         path = Path(filepath)
         trace_id = trace_id or get_current_trace_id()
 
         if path.suffix.lower() in _IMAGE_EXTENSIONS:
-            queue_status: IngestStatus = "skipped_image"
-            if enqueue_for_rag and self._can_queue_rag_jobs():
-                queue_result = self._enqueue_rag_job(
-                    IngestJob(
-                        filepath=filepath,
-                        content_list=[{"type": "image", "img_path": str(path), "page_idx": 0}],
-                        trace_id=trace_id,
-                    )
+            image_payload = [{"type": "image", "img_path": str(path), "page_idx": 0}]
+            image_job = IngestJob(
+                filepath=filepath,
+                content_list=image_payload,
+                trace_id=trace_id,
+            )
+
+            if not enqueue_for_rag:
+                # Defer: don't touch state yet; enqueue_after_organize will.
+                return PreparedIngestResult(
+                    ingest_status="deferred",
+                    deferred_job=image_job,
                 )
+
+            queue_status: IngestStatus = "skipped_image"
+            if self._can_queue_rag_jobs():
+                queue_result = self._enqueue_rag_job(image_job)
                 if queue_result == "queue_full":
                     queue_status = queue_result
-            elif enqueue_for_rag:
+            else:
                 queue_status = "not_ready"
                 self._set_state(filepath, "not_ready", error="RAG service is not ready.")
-            else:
-                self._set_state(filepath, "skipped_image")
             return PreparedIngestResult(ingest_status=queue_status)
 
         content_list = await self._fast_parser.parse(path)
@@ -161,18 +184,43 @@ class BackgroundIngestWorker:
                 path.name,
             )
 
-        queue_status: IngestStatus = "not_ready"
-        if enqueue_for_rag and self._can_queue_rag_jobs():
+        if not enqueue_for_rag:
+            return PreparedIngestResult(
+                ingest_status="deferred",
+                extracted_text=extracted_text,
+                content_list=content_list,
+                deferred_job=IngestJob(filepath=filepath, trace_id=trace_id),
+            )
+
+        queue_status = "not_ready"
+        if self._can_queue_rag_jobs():
             queue_status = self._enqueue_rag_job(
                 IngestJob(filepath=filepath, trace_id=trace_id)
             )
-        elif enqueue_for_rag:
+        else:
             self._set_state(filepath, "not_ready", error="RAG service is not ready.")
         return PreparedIngestResult(
             ingest_status=queue_status,
             extracted_text=extracted_text,
             content_list=content_list,
         )
+
+    async def enqueue_after_organize(
+        self, prepared: PreparedIngestResult
+    ) -> IngestStatus:
+        """Actually enqueue a deferred ingest job after foreground work finishes.
+
+        Returns the resulting ``IngestStatus`` (queued/queue_full/not_ready).
+        Safe to call when ``prepared`` is None or has no deferred job.
+        """
+        if prepared is None or prepared.deferred_job is None:
+            return prepared.ingest_status if prepared is not None else "not_ready"
+
+        job = prepared.deferred_job
+        if not self._can_queue_rag_jobs():
+            self._set_state(job.filepath, "not_ready", error="RAG service is not ready.")
+            return "not_ready"
+        return self._enqueue_rag_job(job)
 
     async def enqueue(self, filepath: str, trace_id: str | None = None) -> PreparedIngestResult:
         """Backward-compatible wrapper for prepare(queue=True)."""
@@ -305,26 +353,35 @@ class BackgroundIngestWorker:
         logger.info("Ingest worker loop exited.")
 
     async def _process_job(self, job: IngestJob) -> None:
-        """Resolve rich content for one job and insert it into RAG."""
-        if job.content_list is not None:
-            await self._ingest_to_rag(job.content_list, job.filepath)
-            return
+        """Resolve rich content for one job and insert it into RAG.
 
-        content_list = await self._rich_parser.parse(job.filepath)
-        if content_list:
-            await self._ingest_to_rag(content_list, job.filepath)
-            return
+        Marks the task's request priority as ``background`` so any LLM /
+        embedding call made during the RAG insert yields to foreground
+        organize calls competing for the same llama-server slot.
+        """
+        priority_token = request_priority_var.set("background")
+        try:
+            if job.content_list is not None:
+                await self._ingest_to_rag(job.content_list, job.filepath)
+                return
 
-        logger.warning(
-            "Docling[%s] parse returned empty for %s — falling back to rag.ingest()",
-            self._rich_parser.profile_name,
-            job.filepath,
-        )
-        await self._prepare_rag_engine_for_insert(job.filepath)
-        ingested = await self._rag.ingest(job.filepath)
-        if ingested is False:
-            raise RuntimeError("RAG ingest returned false.")
-        await self._verify_rag_indexed(job.filepath)
+            content_list = await self._rich_parser.parse(job.filepath)
+            if content_list:
+                await self._ingest_to_rag(content_list, job.filepath)
+                return
+
+            logger.warning(
+                "Docling[%s] parse returned empty for %s — falling back to rag.ingest()",
+                self._rich_parser.profile_name,
+                job.filepath,
+            )
+            await self._prepare_rag_engine_for_insert(job.filepath)
+            ingested = await self._rag.ingest(job.filepath)
+            if ingested is False:
+                raise RuntimeError("RAG ingest returned false.")
+            await self._verify_rag_indexed(job.filepath)
+        finally:
+            request_priority_var.reset(priority_token)
 
     async def _ingest_to_rag(
         self, content_list: list[dict[str, Any]], file_path: str

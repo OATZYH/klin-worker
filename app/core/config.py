@@ -146,7 +146,13 @@ class Settings(BaseSettings):
     llama_server_url: str = "http://127.0.0.1:8080/"
     llama_embedding_server_url: str = "http://127.0.0.1:8081/"
     embedding_dim_size: int = 1024  # must match model served by llama-server
-    llama_max_concurrent_requests: int = 1  # single local llama-server is usually not parallel-safe
+    llama_max_concurrent_requests: int = 1  # legacy: kept as a fallback for older configs
+    # Per-endpoint concurrency. Chat and embed run as separate llama-server
+    # processes (ports 8080/8081), so they never physically contend; the
+    # client semaphore should not artificially serialize them.
+    # Match these to KLIN_CHAT_PARALLEL / KLIN_EMBED_PARALLEL on the sidecar.
+    llama_chat_concurrency: int = 2
+    llama_embed_concurrency: int = 2
     llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
     llm_output_max_tokens: int = 4096
     rag_chunk_token_size: int = 4096

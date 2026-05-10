@@ -525,12 +525,19 @@ async def _process_single_file_inner(
     elif not file_changed and not force:
         telemetry.rag_status = "skipped_unchanged"
     else:
+        # Parse synchronously but DEFER the RAG enqueue. The background
+        # ingest competes with foreground LLM calls (schedule/summary/rename/
+        # classify) for the llama-server slot; deferring until foreground
+        # work finishes eliminates that contention window entirely. The
+        # actual enqueue happens via ingest.enqueue_after_organize() once
+        # classify completes.
         prepared_ingest = await ingest.prepare(
             filepath=scan.original_path,
             trace_id=get_current_trace_id(),
+            enqueue_for_rag=False,
         )
         telemetry.rag_status = prepared_ingest.ingest_status
-    telemetry.record_timing("rag_enqueue", elapsed_ms(step_started_at))
+    telemetry.record_timing("rag_parse", elapsed_ms(step_started_at))
 
     step_started_at = time.perf_counter()
     schedule_result: ScheduleExtractionResponse | None = None
@@ -698,6 +705,17 @@ async def _process_single_file_inner(
             telemetry=telemetry,
         )
     telemetry.record_timing("classify", elapsed_ms(step_started_at))
+
+    # Foreground LLM work is done — now enqueue the deferred background RAG
+    # ingest. This is the moment we relinquish the chat/embed slot so the
+    # background worker can pick up without contending with user-visible
+    # calls. Skipped silently if there's no deferred job (rag not ready or
+    # cached/unchanged path).
+    if prepared_ingest is not None and prepared_ingest.deferred_job is not None:
+        step_started_at = time.perf_counter()
+        rag_status_after = await ingest.enqueue_after_organize(prepared_ingest)
+        telemetry.rag_status = rag_status_after
+        telemetry.record_timing("rag_enqueue", elapsed_ms(step_started_at))
 
     category_responses = _build_category_responses(scores)
 
