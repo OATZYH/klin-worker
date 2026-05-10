@@ -11,15 +11,16 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
-from app.models.response import ScheduleExtractionResponse
+from app.models.response import ScheduleEventCandidate, ScheduleExtractionResponse
 from app.observability.tracing import (
     observe,
     start_as_current_observation,
@@ -58,6 +59,89 @@ _DATE_TIME_RE = re.compile(
 )
 _FLIGHT_RE = re.compile(r"\b[A-Z]{2,3}\s?\d{2,4}\b")
 _AIRPORT_RE = re.compile(r"\b[A-Z]{3}\b")
+_MONTH_ALIASES = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+    "ม.ค": 1,
+    "ม.ค.": 1,
+    "มกราคม": 1,
+    "ก.พ": 2,
+    "ก.พ.": 2,
+    "กุมภาพันธ์": 2,
+    "มี.ค": 3,
+    "มี.ค.": 3,
+    "มีนาคม": 3,
+    "เม.ย": 4,
+    "เม.ย.": 4,
+    "เมษายน": 4,
+    "พ.ค": 5,
+    "พ.ค.": 5,
+    "พฤษภาคม": 5,
+    "มิ.ย": 6,
+    "มิ.ย.": 6,
+    "มิถุนายน": 6,
+    "ก.ค": 7,
+    "ก.ค.": 7,
+    "กรกฎาคม": 7,
+    "ส.ค": 8,
+    "ส.ค.": 8,
+    "สิงหาคม": 8,
+    "ก.ย": 9,
+    "ก.ย.": 9,
+    "กันยายน": 9,
+    "ต.ค": 10,
+    "ต.ค.": 10,
+    "ตุลาคม": 10,
+    "พ.ย": 11,
+    "พ.ย.": 11,
+    "พฤศจิกายน": 11,
+    "ธ.ค": 12,
+    "ธ.ค.": 12,
+    "ธันวาคม": 12,
+}
+_MONTH_NAME_PATTERN = "|".join(
+    re.escape(name) for name in sorted(_MONTH_ALIASES, key=len, reverse=True)
+)
+_YEAR_FIRST_DATE_RE = re.compile(
+    r"(?<!\d)(?P<year>\d{4})[-/.](?P<month>\d{1,2})[-/.](?P<day>\d{1,2})(?!\d)"
+)
+_DAY_FIRST_NUMERIC_DATE_RE = re.compile(
+    r"(?<!\d)(?P<day>\d{1,2})[-/.](?P<month>\d{1,2})[-/.](?P<year>\d{4}|\d{2})(?!\d)"
+)
+_DAY_MONTH_NAME_DATE_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<day>\d{{1,2}})(?:st|nd|rd|th)?"
+    rf"\s*(?:[,./-]\s*)?(?P<month>{_MONTH_NAME_PATTERN})\.?"
+    rf"\s*(?:[,./-]\s*)?(?P<year>\d{{4}}|\d{{2}})(?!\d)",
+    re.IGNORECASE,
+)
+_MONTH_NAME_DAY_DATE_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?P<month>{_MONTH_NAME_PATTERN})\.?"
+    rf"\s*(?:[,./-]\s*)?(?P<day>\d{{1,2}})(?:st|nd|rd|th)?"
+    rf"\s*,?\s*(?P<year>\d{{4}}|\d{{2}})(?!\d)",
+    re.IGNORECASE,
+)
 
 
 class ScheduleExtractionService:
@@ -121,7 +205,6 @@ class ScheduleExtractionService:
         # latency-critical and a second shot on a freshly-released slot
         # almost always succeeds when the first attempt was contended.
         raw: str | None = None
-        last_error: BaseException | None = None
         last_error_label = "timeout"
         for attempt in range(1, _SCHEDULE_LLM_MAX_ATTEMPTS + 1):
             try:
@@ -144,8 +227,7 @@ class ScheduleExtractionService:
                     timeout=_SCHEDULE_LLM_TIMEOUT_SECONDS,
                 )
                 break
-            except asyncio.TimeoutError as exc:
-                last_error = exc
+            except asyncio.TimeoutError:
                 last_error_label = "timeout"
                 logger.warning(
                     "Schedule extraction timed out (attempt %d/%d) file=%s",
@@ -156,7 +238,6 @@ class ScheduleExtractionService:
                 if attempt >= _SCHEDULE_LLM_MAX_ATTEMPTS:
                     break
             except AiCapabilityUnavailableError as exc:
-                last_error = exc
                 last_error_label = "ai_unavailable"
                 logger.warning(
                     "Schedule extraction AI unavailable (attempt %d/%d) file=%s: %s",
@@ -216,12 +297,17 @@ class ScheduleExtractionService:
                 error="Schedule extraction returned invalid JSON.",
             )
 
+        events_before_filter = len(result.events)
+        result.events = self._filter_events(result.events, source_text=context)
+        dropped_event_count = events_before_filter - len(result.events)
+
         for event in result.events:
             if len(event.source_text) > _SOURCE_TEXT_MAX_CHARS:
                 event.source_text = event.source_text[:_SOURCE_TEXT_MAX_CHARS].rstrip()
         update_current_span(
             output={
                 "event_count": len(result.events),
+                "dropped_event_count": dropped_event_count,
                 "has_error": bool(result.error),
                 "event_types": [event.type for event in result.events],
             }
@@ -558,7 +644,7 @@ class ScheduleExtractionService:
         source_pages: list[int],
     ) -> str:
         file_name = Path(file_path).name
-        today = datetime.now().astimezone().date().isoformat()
+        today = datetime.now(ZoneInfo(_DEFAULT_TIMEZONE)).date().isoformat()
         page_hint = ", ".join(str(page) for page in source_pages) or "unknown"
         return (
             "You extract calendar events from local files. "
@@ -567,7 +653,11 @@ class ScheduleExtractionService:
             "If required start/end time is missing, omit that event. "
             f"If timezone is not explicit, use {_DEFAULT_TIMEZONE}. "
             "Always use the date written in the document. "
-            f"Today is {today} — use it only to resolve relative expressions like 'tomorrow' or 'next Monday', never as the event date unless the document explicitly says so. "
+            f"Today is {today}. Use it ONLY to resolve relative phrases like 'tomorrow' or 'next Monday'. Never copy today's date into start.dateTime or end.dateTime unless the document literally writes that date. "
+            "Only create an event when the document contains a complete date with day, month, and year. "
+            "Accept complete dates in ISO, numeric, text-month, and compact travel formats, including 2-digit years. "
+            "If the document gives only a month/day with no year (e.g. '14JAN' or '11May'), only month/year (e.g. 'May 2026'), or only a weekday/time, OMIT that event — do not guess missing date parts. "
+            "If you cannot find an explicit complete calendar date in the document for the event, OMIT the event entirely. "
             "Use event types: meeting, flight, appointment, other. "
             "Use type flight for boarding passes, flight tickets, and itineraries. "
             "Each event must have: type, confidence, source_pages, source_text, missing_fields, google_event. "
@@ -579,9 +669,109 @@ class ScheduleExtractionService:
             "attendees must be [] unless real named people with real email addresses appear explicitly in the document — never fabricate or infer email addresses from boilerplate, disclaimers, or signatures. "
             'reminders must be {"useDefault": true}. '
             "Do not create Google Meet conferenceData. If an existing meeting URL is present, place it in location or description.\n\n"
-            f"Today: {today}\n"
             f"File: {file_name}\n"
             f"Candidate pages: {page_hint}\n\n"
             f"Content:\n{context}\n\n"
             "JSON:"
         )
+
+    @classmethod
+    def _filter_events(
+        cls, events: list[ScheduleEventCandidate], *, source_text: str = ""
+    ) -> list[ScheduleEventCandidate]:
+        """Drop events without a usable, current/future, source-backed date."""
+        today_local = datetime.now(ZoneInfo(_DEFAULT_TIMEZONE)).date()
+        kept: list[ScheduleEventCandidate] = []
+        for event in events:
+            ge = event.google_event
+            if ge is None:
+                continue
+            if not (ge.start and ge.start.dateTime and ge.end and ge.end.dateTime):
+                continue
+            parsed = cls._parse_event_datetime(ge.start.dateTime, ge.start.timeZone)
+            if parsed is None:
+                continue
+            event_date = parsed.astimezone(ZoneInfo(_DEFAULT_TIMEZONE)).date()
+            if event_date < today_local:
+                continue
+            if not cls._has_matching_complete_source_date(
+                expected_date=event_date,
+                event=event,
+                source_text=source_text,
+            ):
+                continue
+            kept.append(event)
+        return kept
+
+    @staticmethod
+    def _parse_event_datetime(value: str, tz_name: str | None) -> datetime | None:
+        if not value:
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            tz: ZoneInfo
+            try:
+                tz = ZoneInfo(tz_name) if tz_name else ZoneInfo(_DEFAULT_TIMEZONE)
+            except ZoneInfoNotFoundError:
+                tz = ZoneInfo(_DEFAULT_TIMEZONE)
+            dt = dt.replace(tzinfo=tz)
+        return dt
+
+    @classmethod
+    def _has_matching_complete_source_date(
+        cls,
+        *,
+        expected_date: date,
+        event: ScheduleEventCandidate,
+        source_text: str,
+    ) -> bool:
+        evidence_text = source_text.strip() or event.source_text
+        return expected_date in cls._extract_complete_source_dates(evidence_text)
+
+    @classmethod
+    def _extract_complete_source_dates(cls, text: str) -> set[date]:
+        if not text:
+            return set()
+
+        dates: set[date] = set()
+        for pattern in (
+            _YEAR_FIRST_DATE_RE,
+            _DAY_FIRST_NUMERIC_DATE_RE,
+            _DAY_MONTH_NAME_DATE_RE,
+            _MONTH_NAME_DAY_DATE_RE,
+        ):
+            for match in pattern.finditer(text):
+                parsed = cls._date_from_match(match)
+                if parsed is not None:
+                    dates.add(parsed)
+        return dates
+
+    @staticmethod
+    def _date_from_match(match: re.Match[str]) -> date | None:
+        groups = match.groupdict()
+        month_value = groups["month"]
+        if month_value.isdigit():
+            month = int(month_value)
+        else:
+            month = _MONTH_ALIASES.get(month_value.lower().rstrip("."))
+        if month is None:
+            return None
+
+        year = int(groups["year"])
+        if year < 100:
+            year += 2000
+        elif 2400 <= year <= 2699:
+            year -= 543
+
+        try:
+            return date(year, month, int(groups["day"]))
+        except ValueError:
+            return None
