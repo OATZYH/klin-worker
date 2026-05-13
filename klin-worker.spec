@@ -3,7 +3,7 @@
 from pathlib import Path
 import os
 
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 
 # In PyInstaller spec execution, __file__ is not guaranteed. Use CWD fallback.
@@ -14,10 +14,8 @@ datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "VERSION"), "."),
 ]
-datas += collect_data_files("docling")
-datas += collect_data_files("docling_ibm_models")
-
-hiddenimports = [
+binaries: list[tuple[str, str]] = []
+hiddenimports: list[str] = [
     "aiosqlite",
     "alembic.command",
     "alembic.config",
@@ -28,15 +26,31 @@ hiddenimports = [
 
 hiddenimports += collect_submodules("app")
 hiddenimports += collect_submodules("raganything")
-hiddenimports += collect_submodules("docling")
-hiddenimports += collect_submodules("docling_core")
-hiddenimports += collect_submodules("docling_ibm_models")
+
+# Bundle the docling stack and its native ML dependencies in full.
+# collect_all captures submodules, data files AND dynamic libs (.dll/.pyd) —
+# strictly stronger than collect_submodules + collect_data_files for native
+# extensions like docling_parse (C++/Cython) and torch / onnxruntime DLLs.
+for pkg in (
+    "docling",
+    "docling_core",
+    "docling_parse",
+    "docling_ibm_models",
+    "torch",
+    "onnxruntime",
+    "transformers",
+    "huggingface_hub",
+):
+    pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
+    datas += pkg_datas
+    binaries += pkg_binaries
+    hiddenimports += pkg_hidden
 
 
 a = Analysis(
     ["main.py"],
     pathex=[str(project_root)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
