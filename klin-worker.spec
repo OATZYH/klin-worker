@@ -14,6 +14,9 @@ datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "VERSION"), "."),
 ]
+datas += collect_data_files("docling")
+datas += collect_data_files("docling_ibm_models")
+
 hiddenimports = [
     "aiosqlite",
     "alembic.command",
@@ -25,6 +28,9 @@ hiddenimports = [
 
 hiddenimports += collect_submodules("app")
 hiddenimports += collect_submodules("raganything")
+hiddenimports += collect_submodules("docling")
+hiddenimports += collect_submodules("docling_core")
+hiddenimports += collect_submodules("docling_ibm_models")
 
 
 a = Analysis(
@@ -39,12 +45,12 @@ a = Analysis(
     excludes=[
         # MinerU parser — not used at runtime (we use docling).
         # Excluding it and its heavy transitive deps shrinks the binary.
+        # NOTE: torch / torchvision are NOT excluded — docling-ibm-models
+        # (layout + TableFormer) loads them at runtime.
         "mineru",
         "magic_pdf",
         "paddleocr",
         "paddlepaddle",
-        "torch",
-        "torchvision",
         "detectron2",
         "unimernet",
         "struct_eqtable",
