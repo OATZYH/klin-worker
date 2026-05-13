@@ -23,10 +23,23 @@ from typing import Any, Optional
 
 import numpy as np
 
+from raganything.parser import DoclingParser
+
 from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.core.config import settings
 from app.observability.tracing import observe, update_current_span
 from app.services.ai.llm_client import llm_client
+
+# RAG-Anything probes for the `docling` CLI via subprocess
+# (`docling --version`) in DoclingParser.check_installation, called from
+# _ensure_lightrag_initialized and capability endpoints. PyInstaller does
+# NOT bundle pip console_scripts (PyInstaller#6362, "won't fix"), so the
+# probe always fails inside the frozen exe even though the docling Python
+# package IS bundled and works in-process. KLIN parses files via its own
+# DoclingParser in app/services/files/docling_parser.py and feeds the
+# result to RAG-Anything via insert_content_list(), so the CLI is never
+# used at runtime. Force the probe to succeed.
+DoclingParser.check_installation = lambda self: True  # type: ignore[method-assign]
 
 logger = logging.getLogger(__name__)
 

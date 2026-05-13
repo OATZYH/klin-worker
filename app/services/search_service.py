@@ -472,9 +472,10 @@ async def _semantic_file_paths(
                     output={
                         **_semantic_trace_payload(outcome),
                         "lightrag_init_success": bool(init_success),
+                        "lightrag_init_error": error,
                     },
                     level="WARNING",
-                    status_message="Semantic search degraded: LightRAG initialization failed.",
+                    status_message=f"Semantic search degraded: {error}",
                 )
                 return outcome
         else:

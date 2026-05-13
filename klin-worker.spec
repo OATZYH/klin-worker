@@ -40,6 +40,31 @@ for pkg in (
     "onnxruntime",
     "transformers",
     "huggingface_hub",
+    # LightRAG and its default storage backends (NanoVectorDB + NetworkX +
+    # JSON KV/doc-status). Storage classes are imported by string name at
+    # runtime, so PyInstaller can't see them without collect_all.
+    "lightrag",
+    "nano_vectordb",
+    "networkx",
+    # tiktoken's encodings (o200k_base, cl100k_base, …) live in the sister
+    # package tiktoken_ext and are discovered via entry_points, which
+    # PyInstaller's static analyzer can't see. Bundle both explicitly.
+    # See openai/tiktoken#43, #218, #334, #469.
+    "tiktoken",
+    "tiktoken_ext",
+    # Docling's default OCR engine (do_ocr=True). Ships ONNX model weights
+    # and YAML configs as package data PyInstaller doesn't auto-collect.
+    # omegaconf reads those YAMLs; pyclipper + shapely (native libs) are
+    # used by the text-detection pipeline.
+    "rapidocr",
+    "omegaconf",
+    "pyclipper",
+    "shapely",
+    # PDF backend (docling_parse uses pypdfium2 for rendering; native .pyd).
+    # lxml is the XML backend used by python-docx / python-pptx / bs4 /
+    # docling's HTML reader — has C extensions PyInstaller can miss.
+    "pypdfium2",
+    "lxml",
 ):
     pkg_datas, pkg_binaries, pkg_hidden = collect_all(pkg)
     datas += pkg_datas
