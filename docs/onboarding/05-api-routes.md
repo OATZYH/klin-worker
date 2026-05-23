@@ -160,6 +160,11 @@ Field conventions in request/response models:
 
 ### `POST /api/search/files`
 
-Current implementation returns mock search results used by frontend integration.
+Hybrid search over files that have already passed through organize.
+
+- Filename matches use SQLite `files.current_path` basename only.
+- Semantic matches use LightRAG/RAG-Anything references from the existing RAG store.
+- Filename matches are returned first; semantic-only matches are appended and deduplicated.
+- If RAG is unavailable, the endpoint still returns filename matches.
 
 Continue with [06-organize-pipeline.md](./06-organize-pipeline.md).

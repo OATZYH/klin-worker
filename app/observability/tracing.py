@@ -9,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Callable, Iterator, TypeVar, cast
+from typing import Any, Callable, Iterator, Literal, TypeVar, cast
 
 from langfuse import Langfuse, propagate_attributes as langfuse_propagate_attributes
 
@@ -18,11 +18,16 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
+ObservationKind = Literal["span", "generation"]
 
 _langfuse_client: Langfuse | None = None
 _current_request_trace_id: ContextVar[str | None] = ContextVar(
     "current_request_trace_id",
     default=None,
+)
+_suppress_trace_text_payloads: ContextVar[bool] = ContextVar(
+    "suppress_trace_text_payloads",
+    default=False,
 )
 
 _KEY_REDACTIONS = {
@@ -173,6 +178,19 @@ def reset_current_request_trace_id(token: object) -> None:
     _current_request_trace_id.reset(token)
 
 
+def is_trace_text_payload_suppressed() -> bool:
+    return _suppress_trace_text_payloads.get()
+
+
+@contextmanager
+def suppress_trace_text_payloads() -> Iterator[None]:
+    token = _suppress_trace_text_payloads.set(True)
+    try:
+        yield
+    finally:
+        _suppress_trace_text_payloads.reset(token)
+
+
 @contextmanager
 def propagate_trace_attributes(
     *,
@@ -283,6 +301,46 @@ def update_current_generation(
     )
 
 
+def update_current_observation(
+    *,
+    as_type: ObservationKind = "span",
+    name: str | None = None,
+    input: Any = None,
+    output: Any = None,
+    metadata: Any = None,
+    level: str | None = None,
+    status_message: str | None = None,
+    completion_start_time: datetime | None = None,
+    model: str | None = None,
+    model_parameters: dict[str, Any] | None = None,
+    usage_details: dict[str, int] | None = None,
+) -> None:
+    """Update the current Langfuse observation using the correct SDK method."""
+    if as_type == "generation":
+        update_current_generation(
+            name=name,
+            input=input,
+            output=output,
+            metadata=metadata,
+            level=level,
+            status_message=status_message,
+            completion_start_time=completion_start_time,
+            model=model,
+            model_parameters=model_parameters,
+            usage_details=usage_details,
+        )
+        return
+
+    update_current_span(
+        name=name,
+        input=input,
+        output=output,
+        metadata=metadata,
+        level=level,
+        status_message=status_message,
+    )
+
+
 def observe(
     func: F | None = None,
     *,
@@ -312,25 +370,19 @@ def observe(
                     try:
                         result = await inner(*args, **kwargs)
                     except Exception as exc:
-                        if as_type == "generation":
-                            update_current_generation(
-                                level="ERROR",
-                                status_message=str(exc),
-                                metadata={"exception_type": type(exc).__name__},
-                            )
-                        else:
-                            update_current_span(
-                                level="ERROR",
-                                status_message=str(exc),
-                                metadata={"exception_type": type(exc).__name__},
-                            )
+                        update_current_observation(
+                            as_type=cast(ObservationKind, as_type),
+                            level="ERROR",
+                            status_message=str(exc),
+                            metadata={"exception_type": type(exc).__name__},
+                        )
                         raise
 
                     if capture_output:
-                        if as_type == "generation":
-                            update_current_generation(output=result)
-                        else:
-                            update_current_span(output=result)
+                        update_current_observation(
+                            as_type=cast(ObservationKind, as_type),
+                            output=result,
+                        )
                     return result
 
             return cast(F, async_wrapper)
@@ -349,14 +401,18 @@ def observe(
                 try:
                     result = inner(*args, **kwargs)
                 except Exception as exc:
-                    update_current_span(
+                    update_current_observation(
+                        as_type=cast(ObservationKind, as_type),
                         level="ERROR",
                         status_message=str(exc),
                         metadata={"exception_type": type(exc).__name__},
                     )
                     raise
                 if capture_output:
-                    update_current_span(output=result)
+                    update_current_observation(
+                        as_type=cast(ObservationKind, as_type),
+                        output=result,
+                    )
                 return result
 
         return cast(F, sync_wrapper)

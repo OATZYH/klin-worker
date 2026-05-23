@@ -19,6 +19,10 @@ from app.services.ai.llm_client import llm_client
 logger = logging.getLogger(__name__)
 
 _MIN_EXTRACTED_TEXT_CHARS = 40
+# Cap context so a single summary request stays within one llama-server slot
+# (ctx_size 4096 / parallel 2 ≈ 2048 tokens per slot, shared with the prompt
+# template and the requested max_tokens output).
+_MAX_EXTRACTED_TEXT_CHARS = 6000
 
 
 class SummaryService:
@@ -151,6 +155,14 @@ class SummaryService:
     def _get_text_context(path: Path, extracted_text: str | None) -> str:
         """Resolve summary context from fast parse output or filename fallback."""
         if extracted_text and len(extracted_text) >= _MIN_EXTRACTED_TEXT_CHARS:
+            if len(extracted_text) > _MAX_EXTRACTED_TEXT_CHARS:
+                logger.info(
+                    "Truncating extracted text for %s: %d -> %d chars",
+                    path.name,
+                    len(extracted_text),
+                    _MAX_EXTRACTED_TEXT_CHARS,
+                )
+                return extracted_text[:_MAX_EXTRACTED_TEXT_CHARS]
             return extracted_text
 
         logger.warning("No extracted text for %s — falling back to filename", path.name)

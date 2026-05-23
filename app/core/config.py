@@ -135,14 +135,27 @@ class Settings(BaseSettings):
 
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
+    rag_enable_image_processing: bool = True
+    rag_enable_table_processing: bool = False
+    rag_enable_equation_processing: bool = False
+    rag_enable_kg_extraction: bool = False
+    rag_content_format: str = "auto"
+    rag_embedding_timeout_seconds: int = 300
 
     # ── llama-server / client defaults ─────────────────────────────────
     llama_server_url: str = "http://127.0.0.1:8080/"
     llama_embedding_server_url: str = "http://127.0.0.1:8081/"
-    embedding_dim_size: int = 768  # must match model served by llama-server
+    embedding_dim_size: int = 1024  # must match model served by llama-server
+    llama_max_concurrent_requests: int = 1  # legacy: kept as a fallback for older configs
+    # Per-endpoint concurrency. Chat and embed run as separate llama-server
+    # processes (ports 8080/8081), so they never physically contend; the
+    # client semaphore should not artificially serialize them.
+    # Match these to KLIN_CHAT_PARALLEL / KLIN_EMBED_PARALLEL on the sidecar.
+    llama_chat_concurrency: int = 2
+    llama_embed_concurrency: int = 2
     llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
     llm_output_max_tokens: int = 4096
-    rag_embedding_input_max_tokens: int = 2048  # must match --ctx-size of embedding llama-server
+    rag_chunk_token_size: int = 4096
 
     # ── Summary service tuning ──────────────────────────────────────────
     summary_retrieval_top_k: int = 2
@@ -153,11 +166,13 @@ class Settings(BaseSettings):
 
     # ── RAG service tuning ──────────────────────────────────────────────
     rag_output_max_tokens: int = 512
+    search_semantic_min_score: float = 0.55
+    search_semantic_score_only_min_score: float = 0.85
     docling_parser_max_workers: int = 2
     docling_fast_do_ocr: bool = False
     docling_fast_do_table_structure: bool = False
     docling_rich_do_ocr: bool = True
-    docling_rich_do_table_structure: bool = True
+    docling_rich_do_table_structure: bool = False
 
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
@@ -196,10 +211,6 @@ class Settings(BaseSettings):
     }
 
     # ── Resolved accessors ─────────────────────────────────────────────
-
-    @property
-    def embedding_dim(self) -> int:
-        return self.embedding_dim_size
 
     @property
     def langfuse_environment(self) -> str:

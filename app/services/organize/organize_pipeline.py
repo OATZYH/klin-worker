@@ -20,7 +20,7 @@ from app.core.ai_exceptions import (
     format_ai_capability_errors,
 )
 from app.db.models import Category, File, FileAnalysis
-from app.models.response import CategoryScoreResponse, OrganizeFileResult
+from app.models.response import CategoryScoreResponse, OrganizeFileResult, ScheduleExtractionResponse
 from app.observability.tracing import get_current_trace_id, observe, update_current_span
 from app.services.ai.llm_client import llm_client
 from app.services.ai.rag_service import RagService
@@ -30,6 +30,7 @@ from app.services.organize.background_ingest import BackgroundIngestWorker
 from app.services.organize.classification_service import ClassificationService
 from app.services.organize.organize_telemetry import OrganizeTelemetry
 from app.services.organize.rename_service import RenameService
+from app.services.organize.schedule_extraction_service import ScheduleExtractionService
 from app.services.organize.scanner_service import ScannerService
 from app.services.summary.summary_service import SummaryService
 from app.services.system_log_service import SystemLogService
@@ -200,6 +201,7 @@ async def process_single_file(
     classifier: ClassificationService,
     summary_svc: SummaryService,
     rename_svc: RenameService,
+    schedule_svc: ScheduleExtractionService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
     ingest: BackgroundIngestWorker,
@@ -215,6 +217,7 @@ async def process_single_file(
             classifier=classifier,
             summary_svc=summary_svc,
             rename_svc=rename_svc,
+            schedule_svc=schedule_svc,
             history_svc=history_svc,
             system_log_svc=system_log_svc,
             ingest=ingest,
@@ -231,6 +234,7 @@ async def _process_single_file_inner(
     classifier: ClassificationService,
     summary_svc: SummaryService,
     rename_svc: RenameService,
+    schedule_svc: ScheduleExtractionService,
     history_svc: HistoryService,
     system_log_svc: SystemLogService,
     ingest: BackgroundIngestWorker,
@@ -521,12 +525,56 @@ async def _process_single_file_inner(
     elif not file_changed and not force:
         telemetry.rag_status = "skipped_unchanged"
     else:
+        # Parse synchronously but DEFER the RAG enqueue. The background
+        # ingest competes with foreground LLM calls (schedule/summary/rename/
+        # classify) for the llama-server slot; deferring until foreground
+        # work finishes eliminates that contention window entirely. The
+        # actual enqueue happens via ingest.enqueue_after_organize() once
+        # classify completes.
         prepared_ingest = await ingest.prepare(
             filepath=scan.original_path,
             trace_id=get_current_trace_id(),
+            enqueue_for_rag=False,
         )
         telemetry.rag_status = prepared_ingest.ingest_status
-    telemetry.record_timing("rag_enqueue", elapsed_ms(step_started_at))
+    telemetry.record_timing("rag_parse", elapsed_ms(step_started_at))
+
+    step_started_at = time.perf_counter()
+    schedule_result: ScheduleExtractionResponse | None = None
+    try:
+        if prepared_ingest is not None:
+            schedule_result = await schedule_svc.extract(
+                file_path=scan.original_path,
+                content_list=prepared_ingest.content_list,
+                extracted_text=prepared_ingest.extracted_text,
+            )
+            if schedule_result.error:
+                await _log_pipeline_issue(
+                    db=db,
+                    system_log_svc=system_log_svc,
+                    level="WARNING",
+                    event_type="organize_schedule_extraction_failed",
+                    message="Schedule extraction failed during organize pipeline.",
+                    filepath=scan.original_path,
+                    file_id=file_record.id,
+                    error=schedule_result.error,
+                    telemetry=telemetry,
+                )
+    except Exception as exc:
+        logger.warning("Schedule extraction failed for %s: %s", scan.original_path, exc)
+        schedule_result = ScheduleExtractionResponse(events=[], error=str(exc))
+        await _log_pipeline_issue(
+            db=db,
+            system_log_svc=system_log_svc,
+            level="WARNING",
+            event_type="organize_schedule_extraction_failed",
+            message="Schedule extraction failed during organize pipeline.",
+            filepath=scan.original_path,
+            file_id=file_record.id,
+            error=str(exc),
+            telemetry=telemetry,
+        )
+    telemetry.record_timing("schedule_extract", elapsed_ms(step_started_at))
 
     step_started_at = time.perf_counter()
     summary_text: str | None = None
@@ -658,6 +706,17 @@ async def _process_single_file_inner(
         )
     telemetry.record_timing("classify", elapsed_ms(step_started_at))
 
+    # Foreground LLM work is done — now enqueue the deferred background RAG
+    # ingest. This is the moment we relinquish the chat/embed slot so the
+    # background worker can pick up without contending with user-visible
+    # calls. Skipped silently if there's no deferred job (rag not ready or
+    # cached/unchanged path).
+    if prepared_ingest is not None and prepared_ingest.deferred_job is not None:
+        step_started_at = time.perf_counter()
+        rag_status_after = await ingest.enqueue_after_organize(prepared_ingest)
+        telemetry.rag_status = rag_status_after
+        telemetry.record_timing("rag_enqueue", elapsed_ms(step_started_at))
+
     category_responses = _build_category_responses(scores)
 
     telemetry.cache_reason = "full_run"
@@ -698,4 +757,5 @@ async def _process_single_file_inner(
         file_id=file_record.id,
         suggested_names=suggested_names,
         categories=category_responses,
+        schedule=schedule_result,
     )
