@@ -27,3 +27,5 @@ output/
 
 # Logs
 logs/
+
+.cogito-folder.json

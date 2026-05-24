@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.ai_exceptions import AiCapabilityUnavailableError
 from app.db.models import File, FileAnalysis
 from app.models.response import (
     GoogleCalendarDateTimeResponse,
@@ -246,6 +247,111 @@ def test_schedule_extraction_failure_does_not_fail_organize() -> None:
         assert result.schedule is not None
         assert result.schedule.error == "bad schedule"
         assert any(log["event_type"] == "organize_schedule_extraction_failed" for log in logs)
+
+    asyncio.run(run())
+
+
+class RecordingHistory:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def log(self, **kwargs) -> FakeHistoryEntry:
+        self.calls.append(kwargs)
+        return FakeHistoryEntry()
+
+
+def test_process_single_file_returns_populated_result_on_golden_path() -> None:
+    async def run() -> None:
+        async def check(db: AsyncSession):
+            order: list[str] = []
+            history = RecordingHistory()
+            result = await process_single_file(
+                filepath="/tmp/report.pdf",
+                force=False,
+                db=db,
+                scanner=FakeScanner(),
+                rag=FakeRag(),
+                classifier=FakeClassifier(),
+                summary_svc=FakeSummary(order),
+                rename_svc=FakeRename(),
+                schedule_svc=FakeSchedule(order),
+                history_svc=history,
+                system_log_svc=FakeSystemLog(),
+                ingest=FakeIngest(order),
+            )
+            return result, history.calls, order
+
+        result, history_calls, order = await _with_ready_llm(lambda: _with_db(check))
+
+        assert result.error is None
+        assert result.file_id  # new File row created and persisted
+        assert result.suggested_names == ["report_meeting.pdf"]
+        assert result.categories == []  # FakeClassifier returns no scores
+        assert result.schedule is not None
+        assert result.schedule.events[0].google_event.summary == "Meeting"
+        # ingest enqueue happens after foreground LLM work
+        assert "enqueue_after_organize" in order
+        # exactly one history log with the full-run action
+        assert len(history_calls) == 1
+        assert history_calls[0]["action"] == "organized"
+
+    asyncio.run(run())
+
+
+def test_process_single_file_returns_503_aggregated_result_when_ai_unavailable() -> None:
+    async def run() -> None:
+        async def check(db: AsyncSession):
+            class BrokenRag:
+                is_ready = False
+
+                def ensure_ready(self) -> None:
+                    raise AiCapabilityUnavailableError("rag", "rag offline")
+
+            async def broken_general() -> None:
+                raise AiCapabilityUnavailableError("chat", "llama-server unreachable")
+
+            async def broken_embedding(*args, **kwargs) -> None:
+                raise AiCapabilityUnavailableError("embedding", "embedding model down")
+
+            original_general = llm_client.ensure_general_available
+            original_embedding = llm_client.ensure_embedding_available
+            llm_client.ensure_general_available = broken_general
+            llm_client.ensure_embedding_available = broken_embedding
+            try:
+                system_log = FakeSystemLog()
+                order: list[str] = []
+                result = await process_single_file(
+                    filepath="/tmp/report.pdf",
+                    force=False,
+                    db=db,
+                    scanner=FakeScanner(),
+                    rag=BrokenRag(),
+                    classifier=FakeClassifier(),
+                    summary_svc=FakeSummary(order),
+                    rename_svc=FakeRename(),
+                    schedule_svc=FakeSchedule(order),
+                    history_svc=FakeHistory(),
+                    system_log_svc=system_log,
+                    ingest=FakeIngest(order),
+                )
+            finally:
+                llm_client.ensure_general_available = original_general
+                llm_client.ensure_embedding_available = original_embedding
+            return result, system_log.logs
+
+        result, logs = await _with_db(check)
+
+        # All three capability errors aggregated into one detail string
+        assert result.error is not None
+        assert "rag offline" in result.error
+        assert "llama-server unreachable" in result.error
+        assert "embedding model down" in result.error
+        # No downstream work happened
+        assert result.suggested_names == []
+        assert result.categories == []
+        assert result.schedule is None
+        # system_log records the AI-unavailable event
+        assert any(log["event_type"] == "organize_ai_unavailable" for log in logs)
 
     asyncio.run(run())
 

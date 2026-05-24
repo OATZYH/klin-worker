@@ -38,10 +38,12 @@ erDiagram
         Text name UK "NOT NULL"
         Text description "NOT NULL"
         String color "NOT NULL, #6366f1"
+        String icon "NULLABLE"
         Text destination_path "NULLABLE"
         Boolean is_path_manual "NOT NULL, false"
         Text embedding "NULLABLE, JSON float[]"
         Boolean is_default "NOT NULL, false"
+        Boolean is_auto_description "NOT NULL, false"
         Boolean is_active "NOT NULL, true"
         DateTime created_at "NOT NULL, UTC"
         DateTime updated_at "NOT NULL, UTC"
@@ -166,10 +168,12 @@ User-defined classification buckets. Each category has an embedding vector used 
 | `name`             | `Text`       | NOT NULL, UNIQUE        | —                | Display name (e.g. "Invoices")               |
 | `description`      | `Text`       | NOT NULL                | `""`             | Human description used for embedding. Can contain natural language plus comma-separated keywords or phrases. |
 | `color`            | `String(7)`  | NOT NULL                | `"#6366f1"`      | Hex color for UI display                     |
+| `icon`             | `String(64)` | NULLABLE                | `NULL`           | Emoji or icon identifier for UI display      |
 | `destination_path` | `Text`       | NULLABLE                | `NULL`           | Target folder for organized files. Auto-set from `default_base_path/{name}` unless manual. |
 | `is_path_manual`   | `Boolean`    | NOT NULL                | `false`          | `true` when user explicitly set `destination_path`. Auto-update from base path is skipped. |
 | `embedding`        | `Text`       | NULLABLE                | `NULL`           | JSON-serialised float list (model-dependent; default model uses 2048 dims) |
 | `is_default`       | `Boolean`    | NOT NULL                | `false`          | `true` for system-seeded categories. User-created categories are `false`. |
+| `is_auto_description` | `Boolean` | NOT NULL                | `false`          | `true` when `description` was auto-generated from a folder path rather than written by the user. |
 | `is_active`        | `Boolean`    | NOT NULL                | `true`           | Soft-delete / disable toggle                 |
 | `created_at`       | `DateTime`   | NOT NULL                | UTC now          | Row creation timestamp                       |
 | `updated_at`       | `DateTime`   | NOT NULL                | UTC now          | Last modification timestamp (auto-updated)   |

@@ -32,6 +32,7 @@ klin-worker = "main:main"
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",
+    "pytest-asyncio>=0.24",
     "ruff>=0.11.0",
 ]
 build = [
@@ -44,8 +45,11 @@ exclude = ["alembic*", "models*", "docs*", "klin-bruno-api*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 markers = [
     "llm: tests requiring live llama-server dependencies",
+    "unit: fast in-process tests with no external I/O",
+    "integration: tests that exercise multiple components (mocks external services)",
 ]
 
 [tool.ruff]
