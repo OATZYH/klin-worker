@@ -1,0 +1,546 @@
+"""
+RAG Service — RAG-Anything integration for semantic file analysis.
+
+Responsibilities:
+  • Initialize RAG-Anything with local storage
+  • Ingest files by absolute path (no upload)
+  • Semantic search across ingested corpus
+  • Generate embeddings for text (used by ClassificationService)
+  • Embedding cache support (future)
+
+RAG-Anything handles its own vector DB internally — we do NOT
+manage a separate vector store.
+
+LLM backend: llama-server (out-of-process, managed by Tauri).
+"""
+
+import base64
+from dataclasses import fields
+import logging
+from pathlib import Path
+import time
+from typing import Any, Optional
+
+import numpy as np
+
+from raganything.parser import DoclingParser
+
+from app.core.ai_exceptions import AiCapabilityUnavailableError
+from app.core.config import settings
+from app.observability.tracing import observe, update_current_span
+from app.services.ai.llm_client import llm_client
+
+# RAG-Anything probes for the `docling` CLI via subprocess
+# (`docling --version`) in DoclingParser.check_installation, called from
+# _ensure_lightrag_initialized and capability endpoints. PyInstaller does
+# NOT bundle pip console_scripts (PyInstaller#6362, "won't fix"), so the
+# probe always fails inside the frozen exe even though the docling Python
+# package IS bundled and works in-process. KLIN parses files via its own
+# DoclingParser in app/services/files/docling_parser.py and feeds the
+# result to RAG-Anything via insert_content_list(), so the CLI is never
+# used at runtime. Force the probe to succeed.
+DoclingParser.check_installation = lambda self: True  # type: ignore[method-assign]
+
+logger = logging.getLogger(__name__)
+
+
+def _detect_image_mime(b64_data: str) -> str:
+    """Detect image MIME type from base64 magic bytes; falls back to image/jpeg."""
+    try:
+        raw = base64.b64decode(b64_data[:16] + "==")
+        if raw[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        if raw[:3] == b'\xff\xd8\xff':
+            return "image/jpeg"
+        if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+            return "image/webp"
+        if raw[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+    except Exception:
+        pass
+    return "image/jpeg"
+
+
+def _sanitize_doc_status_record(doc_id: str, record: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """Normalize persisted LightRAG doc-status records to the active dataclass shape."""
+    if not isinstance(record, dict):
+        logger.warning("Skipping invalid doc-status record for %s: expected dict", doc_id)
+        return None, []
+
+    from lightrag.base import DocProcessingStatus
+
+    allowed_keys = {field.name for field in fields(DocProcessingStatus)}
+    sanitized = record.copy()
+    sanitized.pop("content", None)
+    sanitized.setdefault("file_path", "no-file-path")
+    sanitized.setdefault("metadata", {})
+    sanitized.setdefault("error_msg", None)
+    sanitized.setdefault("chunks_list", [])
+
+    unknown_keys = sorted(key for key in sanitized if key not in allowed_keys)
+    for key in unknown_keys:
+        sanitized.pop(key, None)
+
+    return sanitized, unknown_keys
+
+
+async def ensure_rag_doc_status_compatible(rag_engine: Any) -> int:
+    """Remove stale/unknown doc-status fields before LightRAG deserializes them."""
+    if hasattr(rag_engine, "_ensure_lightrag_initialized"):
+        init_result = await rag_engine._ensure_lightrag_initialized()  # noqa: SLF001
+        if isinstance(init_result, dict) and not init_result.get("success", False):
+            error = init_result.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(str(error))
+
+    lightrag = getattr(rag_engine, "lightrag", None)
+    doc_status = getattr(lightrag, "doc_status", None)
+    storage_lock = getattr(doc_status, "_storage_lock", None)
+    storage_data = getattr(doc_status, "_data", None)
+    if doc_status is None or storage_lock is None or storage_data is None:
+        return 0
+
+    updates: dict[str, dict[str, Any]] = {}
+    dropped_keys: dict[str, list[str]] = {}
+    async with storage_lock:
+        for doc_id, record in storage_data.items():
+            sanitized, unknown_keys = _sanitize_doc_status_record(doc_id, record)
+            if sanitized is None or sanitized == record:
+                continue
+            updates[doc_id] = sanitized
+            if unknown_keys:
+                dropped_keys[doc_id] = unknown_keys
+
+    if not updates:
+        return 0
+
+    await doc_status.upsert(updates)
+    logger.warning(
+        "Normalized %d LightRAG doc-status record(s) for compatibility: %s",
+        len(updates),
+        dropped_keys,
+    )
+    return len(updates)
+
+
+async def configure_lightrag_for_file_search(rag_engine: Any) -> Any:
+    """Initialize LightRAG and apply local file-search defaults."""
+    if hasattr(rag_engine, "_ensure_lightrag_initialized"):
+        init_result = await rag_engine._ensure_lightrag_initialized()  # noqa: SLF001
+        if isinstance(init_result, dict) and not init_result.get("success", False):
+            error = init_result.get("error") or "Failed to initialize LightRAG"
+            raise RuntimeError(str(error))
+
+    lightrag = getattr(rag_engine, "lightrag", None)
+    if lightrag is not None and not settings.rag_enable_kg_extraction:
+        _disable_lightrag_kg_extraction(lightrag)
+        _disable_raganything_kg_extraction(rag_engine)
+    return lightrag
+
+
+def _disable_lightrag_kg_extraction(lightrag: Any) -> None:
+    """Disable KG extraction while preserving full-doc and chunk vector indexing."""
+    if getattr(lightrag, "_klin_kg_extraction_disabled", False):
+        return
+
+    async def _skip_extract_entities(
+        chunk: dict[str, Any],
+        pipeline_status: Any = None,
+        pipeline_status_lock: Any = None,
+    ) -> list[Any]:
+        return []
+
+    lightrag._process_extract_entities = _skip_extract_entities  # noqa: SLF001
+    lightrag._klin_kg_extraction_disabled = True  # noqa: SLF001
+    logger.info("LightRAG KG extraction disabled for local file-search ingestion.")
+
+
+def _disable_raganything_kg_extraction(rag_engine: Any) -> None:
+    """Disable RAGAnything's multimodal KG extraction path."""
+    if getattr(rag_engine, "_klin_multimodal_kg_extraction_disabled", False):
+        return
+    if not hasattr(rag_engine, "_batch_extract_entities_lightrag_style_type_aware"):
+        return
+
+    async def _skip_multimodal_extract_entities(
+        lightrag_chunks: dict[str, Any],
+    ) -> list[Any]:
+        return []
+
+    rag_engine._batch_extract_entities_lightrag_style_type_aware = (  # noqa: SLF001
+        _skip_multimodal_extract_entities
+    )
+    rag_engine._klin_multimodal_kg_extraction_disabled = True  # noqa: SLF001
+    logger.info("RAGAnything multimodal KG extraction disabled for file-search ingestion.")
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    """Convert a generation arg to a positive int when possible."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _resolve_llm_max_tokens(kwargs: dict[str, Any]) -> int:
+    """Pick a sane generation budget for internal RAG llama requests."""
+    for key in ("max_tokens", "n_predict", "max_new_tokens"):
+        resolved = _coerce_positive_int(kwargs.get(key))
+        if resolved is not None:
+            return resolved
+    return settings.rag_output_max_tokens
+
+
+def _resolve_llm_temperature(kwargs: dict[str, Any]) -> float:
+    """Propagate temperature when provided by the caller."""
+    try:
+        return float(kwargs.get("temperature", 0.3))
+    except (TypeError, ValueError):
+        return 0.3
+
+
+class RagService:
+    """
+    Wrapper around RAG-Anything.
+
+    Designed as a singleton-style service — initialised once via `setup()`,
+    then injected into route handlers through FastAPI's dependency system.
+    """
+
+    def __init__(self) -> None:
+        self._rag: Any = None
+        self._embed_func: Any = None  # raw embedding callable
+        self._ready: bool = False
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+
+    @observe(name="rag.setup", capture_input=False, capture_output=False)
+    async def setup(self) -> None:
+        """
+        Lazy-initialise the RAG-Anything engine with llama-server as LLM backend.
+
+        Connection chain:
+          RAGAnything  →  LightRAG  →  llama-server (out-of-process via httpx)
+
+        The llm_client must already be initialised via ``llm_client.startup()``
+        before calling this method.
+
+        Called once at application startup (lifespan event).
+        """
+        if self._ready:
+            return
+
+        try:
+            from lightrag.utils import EmbeddingFunc
+            from raganything import RAGAnything
+            from raganything.config import RAGAnythingConfig
+
+            working_dir = Path(settings.rag_working_dir)
+            working_dir.mkdir(parents=True, exist_ok=True)
+
+            config = RAGAnythingConfig(
+                working_dir=str(working_dir),
+                parse_method="auto",
+                parser="docling",
+                content_format=settings.rag_content_format,
+                use_full_path=True,
+                enable_image_processing=settings.rag_enable_image_processing,
+                enable_table_processing=settings.rag_enable_table_processing,
+                enable_equation_processing=settings.rag_enable_equation_processing,
+            )
+
+            # Keep a reference to the raw embed callable for embed_texts()
+            async def _embed(texts: list[str]) -> np.ndarray:
+                vectors = await llm_client.aembed(texts)
+                return np.array(vectors, dtype=np.float32)
+
+            self._embed_func = _embed
+
+            # Embedding function configured for llama-server
+            embedding_func = EmbeddingFunc(
+                embedding_dim=settings.embedding_dim_size,
+                max_token_size=settings.rag_chunk_token_size,
+                func=_embed,
+            )
+
+            # LLM completion function via llama-server
+            async def _llm_complete(prompt, system_prompt=None, history_messages=None, **kwargs):
+                messages: list[dict[str, str]] = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                if history_messages:
+                    messages.extend(history_messages)
+                messages.append({"role": "user", "content": prompt})
+                return await llm_client.achat(
+                    messages,
+                    temperature=_resolve_llm_temperature(kwargs),
+                    max_tokens=_resolve_llm_max_tokens(kwargs),
+                )
+
+            # Vision / multimodal completion for RAG-Anything's
+            # Visual Content Analyzer (image captions, table analysis, etc.)
+            async def _vision_complete(
+                prompt,
+                system_prompt=None,
+                history_messages=None,
+                image_data=None,
+                messages=None,
+                **kwargs,
+            ):
+                temperature = _resolve_llm_temperature(kwargs)
+                max_tokens = _resolve_llm_max_tokens(kwargs)
+                if messages:
+                    # Pre-formatted multimodal messages from RAG-Anything
+                    return await llm_client.achat_with_vision(
+                        messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                elif image_data:
+                    # Raw base64 image — build OpenAI-style multimodal message
+                    content: list[dict] = [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{_detect_image_mime(image_data)};base64,{image_data}",
+                            },
+                        },
+                    ]
+                    msgs: list[dict] = []
+                    if system_prompt:
+                        msgs.append({"role": "system", "content": system_prompt})
+                    msgs.append({"role": "user", "content": content})
+                    return await llm_client.achat_with_vision(
+                        msgs,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                else:
+                    # No visual content — use standard text LLM
+                    return await _llm_complete(
+                        prompt, system_prompt, history_messages, **kwargs
+                    )
+
+            self._rag = RAGAnything(
+                config=config,
+                llm_model_func=_llm_complete,
+                vision_model_func=_vision_complete,
+                embedding_func=embedding_func,
+                # Limit concurrency for local in-process models to avoid OOM.
+                # Default LightRAG values (8 embed, 4 LLM) are designed for
+                # API-based models; local GGUF models share a single process.
+                lightrag_kwargs={
+                    "embedding_func_max_async": 1,
+                    "llm_model_max_async": 1,
+                    "chunk_token_size": settings.rag_chunk_token_size,
+                    "chunk_overlap_token_size": 64,
+                    "embedding_batch_num": 1,
+                    "max_parallel_insert": 1,
+                    "default_embedding_timeout": settings.rag_embedding_timeout_seconds,
+                },
+            )
+            self._ready = True
+            update_current_span(output={"ready": True, "working_dir": str(working_dir)})
+            logger.info(
+                "RAG-Anything initialised  →  %s  (embd_dim: %d)",
+                working_dir,
+                settings.embedding_dim_size,
+            )
+        except Exception as exc:
+            logger.error("Failed to initialise RAG-Anything: %s", exc)
+            raise
+
+    @property
+    def is_ready(self) -> bool:
+        return self._ready
+
+    def ensure_ready(self) -> None:
+        """Ensure the RAG wrapper is initialised before it is used."""
+        if not self._ready:
+            raise AiCapabilityUnavailableError(
+                "rag",
+                "RAG is unavailable because the RAG service is not initialised.",
+            )
+
+    async def ensure_embedding_available(self) -> None:
+        """Ensure the RAG embedding pipeline is available."""
+        self.ensure_ready()
+        await llm_client.ensure_embedding_available(require_general_check=False)
+
+    async def ensure_full_pipeline_available(self) -> None:
+        """Ensure the full RAG pipeline is available for organize flows."""
+        self.ensure_ready()
+        await llm_client.ensure_general_available()
+        await llm_client.ensure_embedding_available(require_general_check=False)
+
+    # ── Embedding ────────────────────────────────────────────────────────
+
+    @observe(name="rag.embed_texts", capture_input=False, capture_output=False)
+    async def embed_texts(self, texts: list[str]) -> Any:
+        """
+        Generate embeddings for a list of texts.
+
+        Returns a numpy-like array of shape (len(texts), embedding_dim).
+        Used by ClassificationService for category ↔ file similarity.
+        """
+        await self.ensure_embedding_available()
+        update_current_span(metadata={"text_count": len(texts)})
+        return await self._embed_func(texts)
+
+    # ── Ingestion ────────────────────────────────────────────────────────
+
+    @observe(name="rag.ingest", capture_input=False, capture_output=False)
+    async def ingest(self, file_path: str) -> bool:
+        """
+        Ingest a single file into the RAG engine by its absolute path.
+
+        Returns True on success, False on failure.
+        """
+        self.ensure_ready()
+        started_at = time.perf_counter()
+        update_current_span(input={"file_path": file_path})
+
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                logger.warning("Ingest skipped — file not found: %s", file_path)
+                return False
+
+            # RAG-Anything accepts a file path directly — no upload needed.
+            # process_document_complete() parses + inserts into the knowledge graph.
+            await self._rag.process_document_complete(
+                file_path=str(path.resolve()),
+            )
+            logger.info(
+                "Ingested: %s (%.2f ms)",
+                file_path,
+                (time.perf_counter() - started_at) * 1000,
+            )
+            update_current_span(output={"ingested": True})
+            return True
+        except Exception as exc:
+            logger.error(
+                "Ingest failed for %s after %.2f ms: %s",
+                file_path,
+                (time.perf_counter() - started_at) * 1000,
+                exc,
+            )
+            update_current_span(output={"ingested": False}, level="ERROR", status_message=str(exc))
+            return False
+
+    # ── Semantic Search ──────────────────────────────────────────────────
+
+    async def semantic_search(
+        self,
+        query: str,
+        top_k: int = 5,
+        max_content_chars: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Search ingested corpus for semantically similar content.
+
+        Returns a list of match dicts with score + metadata.
+        """
+        self.ensure_ready()
+
+        try:
+            results = await self._rag.aquery(query)
+            return self._format_results(results, top_k, max_content_chars=max_content_chars)
+        except Exception as exc:
+            logger.error("Semantic search failed: %s", exc)
+            return []
+
+    async def multimodal_search(
+        self,
+        query: str,
+        multimodal_content: list[dict[str, Any]] | None = None,
+        top_k: int = 5,
+        max_content_chars: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Search with optional multimodal content for richer results.
+
+        Falls back to standard text query if multimodal is unavailable.
+        """
+        self.ensure_ready()
+
+        try:
+            if multimodal_content and hasattr(self._rag, "aquery_with_multimodal"):
+                results = await self._rag.aquery_with_multimodal(
+                    query,
+                    multimodal_content=multimodal_content,
+                    mode="hybrid",
+                )
+            else:
+                results = await self._rag.aquery(query)
+            return self._format_results(results, top_k, max_content_chars=max_content_chars)
+        except Exception as exc:
+            logger.error("Multimodal search failed, falling back to text: %s", exc)
+            return await self.semantic_search(
+                query,
+                top_k,
+                max_content_chars=max_content_chars,
+            )
+
+    # ── Duplicate Detection (stub — ready for enhancement) ───────────
+
+    async def find_duplicates(
+        self,
+        file_path: str,
+        threshold: Optional[float] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Find semantically similar files to the given path.
+
+        Uses `settings.similarity_threshold` unless overridden.
+        """
+        threshold = threshold or settings.similarity_threshold
+        self.ensure_ready()
+
+        logger.debug(
+            "Duplicate check for %s (threshold=%.2f) — stub",
+            file_path,
+            threshold,
+        )
+        return []
+
+    # ── Internals ────────────────────────────────────────────────────────
+
+    def _assert_ready(self) -> None:
+        self.ensure_ready()
+
+    @staticmethod
+    def _format_results(
+        raw: Any,
+        top_k: int,
+        *,
+        max_content_chars: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Normalise RAG-Anything output into a stable dict format."""
+        if raw is None:
+            return []
+
+        def _trim_content(value: Any) -> str:
+            text = str(value)
+            if max_content_chars and len(text) > max_content_chars:
+                return f"{text[:max_content_chars].rstrip()}…"
+            return text
+
+        def _normalise_item(item: Any) -> dict[str, Any]:
+            if isinstance(item, dict):
+                normalised = dict(item)
+                if "content" in normalised:
+                    normalised["content"] = _trim_content(normalised["content"])
+                return normalised
+            return {"content": _trim_content(item), "score": 1.0}
+
+        # RAG-Anything may return different shapes — we normalise here
+        if isinstance(raw, str):
+            return [{"content": _trim_content(raw), "score": 1.0}]
+
+        if isinstance(raw, list):
+            return [_normalise_item(item) for item in raw[:top_k]]
+
+        # Fallback: wrap whatever we got
+        return [{"content": _trim_content(raw), "score": 1.0}]

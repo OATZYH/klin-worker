@@ -2,17 +2,21 @@
 SQLite database models (SQLModel ORM).
 
 Tables:
-  • categories       — user-defined classification buckets
-  • files             — scanned file metadata
-  • file_analysis     — AI summary + rename suggestion per file
-  • category_scores   — AI classification score per file×category
-  • history_logs      — audit trail of every action
+    • app_settings      — key-value application settings
+    • watched_folders   — auto-organize watcher folders + scan cadence
+    • categories        — user-defined classification buckets
+    • files             — scanned file metadata
+    • file_analysis     — AI summary + rename suggestion per file
+    • category_scores   — AI classification score per file-category
+    • history_logs      — audit trail of every action
+    • system_logs       — operational / application log events
 """
 
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from sqlalchemy import CheckConstraint, Index
 from sqlmodel import Field, Relationship, SQLModel
 
 
@@ -22,6 +26,53 @@ def _utcnow() -> datetime:
 
 def _new_uuid() -> str:
     return str(uuid.uuid4())
+
+
+# ── App Settings ─────────────────────────────────────────────────────────
+
+
+class AppSetting(SQLModel, table=True):
+    __tablename__ = "app_settings"  # type: ignore[assignment]
+
+    key: str = Field(primary_key=True)
+    value: Optional[str] = Field(default=None)
+    updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
+
+
+class WatchedFolder(SQLModel, table=True):
+    __tablename__ = "watched_folders"  # type: ignore[assignment]
+    __table_args__ = (
+        CheckConstraint(
+            "frequency_value > 0",
+            name="ck_watched_folders_frequency_value_positive",
+        ),
+        CheckConstraint(
+            "frequency_seconds > 0",
+            name="ck_watched_folders_frequency_seconds_positive",
+        ),
+        CheckConstraint(
+            "frequency_unit IN ('minute', 'hour', 'day')",
+            name="ck_watched_folders_frequency_unit_valid",
+        ),
+        Index(
+            "ix_watched_folders_enabled_next_scan",
+            "auto_organize_enabled",
+            "next_scan_at",
+        ),
+    )
+
+    id: str = Field(default_factory=_new_uuid, primary_key=True)
+    folder_path: str = Field(nullable=False, unique=True)
+    auto_organize_enabled: bool = Field(default=True, nullable=False)
+    frequency_value: int = Field(default=1, nullable=False)
+    frequency_unit: str = Field(default="day", max_length=16, nullable=False)
+    frequency_seconds: int = Field(default=86400, nullable=False)
+    recursive: bool = Field(default=True, nullable=False)
+    last_scanned_at: Optional[datetime] = Field(default=None)
+    next_scan_at: Optional[datetime] = Field(default=None)
+    last_error: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=_utcnow, nullable=False)
+    updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
 
 # ── Categories ───────────────────────────────────────────────────────────
@@ -34,8 +85,12 @@ class Category(SQLModel, table=True):
     name: str = Field(nullable=False, unique=True)
     description: str = Field(default="", nullable=False)
     color: str = Field(default="#6366f1", max_length=7, nullable=False)
+    icon: Optional[str] = Field(default=None, max_length=64)
     destination_path: Optional[str] = Field(default=None)
+    is_path_manual: bool = Field(default=False, nullable=False)  # True when user set path manually
     embedding: Optional[str] = Field(default=None)  # JSON-serialised float list
+    is_default: bool = Field(default=False, nullable=False)  # Seeded by system
+    is_auto_description: bool = Field(default=False, nullable=False)  # True when description was auto-generated from folder path
     is_active: bool = Field(default=True, nullable=False)
     created_at: datetime = Field(default_factory=_utcnow, nullable=False)
     updated_at: datetime = Field(default_factory=_utcnow, nullable=False)
@@ -55,6 +110,7 @@ class File(SQLModel, table=True):
 
     id: str = Field(default_factory=_new_uuid, primary_key=True)
     original_path: str = Field(nullable=False, unique=True)
+    current_path: str = Field(nullable=False, unique=True)
     hash: str = Field(max_length=64, nullable=False)
     size: int = Field(nullable=False)
     extension: str = Field(max_length=32, nullable=False)
@@ -88,7 +144,8 @@ class FileAnalysis(SQLModel, table=True):
         unique=True,
     )
     summary: Optional[str] = Field(default=None)
-    suggested_name: Optional[str] = Field(default=None)
+    suggested_names: Optional[str] = Field(default=None)  # JSON-serialised list[str]
+    categories_hash: Optional[str] = Field(default=None)  # MD5 of active category semantics at analysis time
     processed_at: datetime = Field(default_factory=_utcnow, nullable=False)
 
     # relationships
@@ -125,3 +182,19 @@ class HistoryLog(SQLModel, table=True):
 
     # relationships
     file: Optional["File"] = Relationship(back_populates="history")
+
+
+# ── System Logs ─────────────────────────────────────────────────────────
+
+
+class SystemLog(SQLModel, table=True):
+    __tablename__ = "system_logs"  # type: ignore[assignment]
+
+    id: str = Field(default_factory=_new_uuid, primary_key=True)
+    level: str = Field(max_length=16, nullable=False)
+    component: str = Field(max_length=64, nullable=False)
+    event_type: str = Field(max_length=64, nullable=False)
+    message: str = Field(nullable=False)
+    context_json: Optional[str] = Field(default=None)  # JSON string
+    correlation_id: Optional[str] = Field(default=None, max_length=64)
+    created_at: datetime = Field(default_factory=_utcnow, nullable=False)

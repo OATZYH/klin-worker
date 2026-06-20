@@ -2,7 +2,7 @@
 Application configuration.
 
 Centralized settings using pydantic-settings for environment variable support.
-Covers: SQLite, Ollama, RAG, security, classification, and future features.
+Covers: SQLite, llama.cpp, RAG, security, classification, and future features.
 
 Storage path resolution:
   - Dev  (plain Python)  → .storage/  inside the project directory
@@ -10,11 +10,16 @@ Storage path resolution:
                            Falls back to ~/.klin if the var is not set.
 """
 
+import logging
+import os
 import sys
+import tomllib
 from pathlib import Path
 from typing import Optional
 
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_default_storage_dir() -> Path:
@@ -30,11 +35,12 @@ def _resolve_default_storage_dir() -> Path:
     if getattr(sys, "frozen", False):
         # Running inside a PyInstaller bundle
         import os
+
         app_data = os.environ.get("KLIN_APP_DATA_DIR")
         if app_data:
             return Path(app_data)
-        # Fallback: next to the executable
-        return Path(sys.executable).parent / "data"
+        # Fallback: stable user-level location when env injection is unavailable.
+        return Path.home() / ".klin"
 
     # Dev: .storage/ at the project root
     _project_root = Path(__file__).resolve().parent.parent.parent
@@ -44,13 +50,52 @@ def _resolve_default_storage_dir() -> Path:
 _KLIN_DIR = _resolve_default_storage_dir()
 
 
+def _resolve_app_version() -> str:
+    """Resolve app version from env/version file/pyproject in that order."""
+    env_version = os.environ.get("KLIN_APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+
+    candidate_files: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidate_files.append(Path(meipass) / "VERSION")
+        candidate_files.append(Path(sys.executable).resolve().parent / "VERSION")
+
+    project_root = Path(__file__).resolve().parent.parent.parent
+    candidate_files.append(project_root / "VERSION")
+
+    for version_file in candidate_files:
+        try:
+            if version_file.exists():
+                value = version_file.read_text(encoding="utf-8").strip()
+                if value:
+                    return value
+        except OSError:
+            continue
+
+    pyproject_path = project_root / "pyproject.toml"
+    try:
+        if pyproject_path.exists():
+            parsed = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+            version = str(parsed.get("project", {}).get("version", "")).strip()
+            if version:
+                return version
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+    return "0.0.0"
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
 
     # ── App ──────────────────────────────────────────────────────────────
     app_name: str = "klin-worker"
-    app_version: str = "0.2.0"
+    app_version: str = _resolve_app_version()
     debug: bool = False
+    app_environment: str = "development"
 
     # ── Server ───────────────────────────────────────────────────────────
     host: str = "127.0.0.1"
@@ -58,9 +103,11 @@ class Settings(BaseSettings):
 
     # ── CORS (Tauri dev mode) ────────────────────────────────────────────
     cors_origins: list[str] = [
-        "http://localhost:1420",   # Tauri dev default
-        "http://localhost:5173",   # Vite fallback
-        "tauri://localhost",       # Tauri production
+        "http://localhost:1420",  # Tauri dev default
+        "http://localhost:5173",  # Vite fallback
+        "tauri://localhost",  # Tauri production
+        "http://tauri.localhost",  # Tauri production (http scheme)
+        "https://tauri.localhost",  # Tauri production (https scheme)
     ]
 
     # ── SQLite ───────────────────────────────────────────────────────────
@@ -88,14 +135,44 @@ class Settings(BaseSettings):
 
     # ── RAG-Anything ─────────────────────────────────────────────────────
     rag_working_dir: str = str(_KLIN_DIR / "rag_storage")
+    rag_enable_image_processing: bool = True
+    rag_enable_table_processing: bool = False
+    rag_enable_equation_processing: bool = False
+    rag_enable_kg_extraction: bool = False
+    rag_content_format: str = "auto"
+    rag_embedding_timeout_seconds: int = 300
 
-    # ── Ollama (local LLM backend) ───────────────────────────────────────
-    ollama_host: str = "http://localhost:11434"
-    ollama_llm_model: str = "gemma3:1b"
-    ollama_embed_model: str = "embeddinggemma:300m"
-    ollama_embedding_dim: int = 768
-    ollama_max_token_size: int = 2048
-    ollama_timeout: int = 300
+    # ── llama-server / client defaults ─────────────────────────────────
+    llama_server_url: str = "http://127.0.0.1:8080/"
+    llama_embedding_server_url: str = "http://127.0.0.1:8081/"
+    embedding_dim_size: int = 1024  # must match model served by llama-server
+    llama_max_concurrent_requests: int = 1  # legacy: kept as a fallback for older configs
+    # Per-endpoint concurrency. Chat and embed run as separate llama-server
+    # processes (ports 8080/8081), so they never physically contend; the
+    # client semaphore should not artificially serialize them.
+    # Match these to KLIN_CHAT_PARALLEL / KLIN_EMBED_PARALLEL on the sidecar.
+    llama_chat_concurrency: int = 2
+    llama_embed_concurrency: int = 2
+    llm_input_max_chars: int = 24000 # accounts for tokenization overhead, varies by model and tokenizer
+    llm_output_max_tokens: int = 4096
+    rag_chunk_token_size: int = 4096
+
+    # ── Summary service tuning ──────────────────────────────────────────
+    summary_retrieval_top_k: int = 2
+    summary_output_max_tokens: int = 2048
+
+    # ── Rename service tuning ───────────────────────────────────────────
+    rename_output_max_tokens: int = 96
+
+    # ── RAG service tuning ──────────────────────────────────────────────
+    rag_output_max_tokens: int = 512
+    search_semantic_min_score: float = 0.55
+    search_semantic_score_only_min_score: float = 0.85
+    docling_parser_max_workers: int = 2
+    docling_fast_do_ocr: bool = False
+    docling_fast_do_table_structure: bool = False
+    docling_rich_do_ocr: bool = True
+    docling_rich_do_table_structure: bool = False
 
     # ── Classification ───────────────────────────────────────────────────
     similarity_threshold: float = 0.85
@@ -104,6 +181,19 @@ class Settings(BaseSettings):
     # ── Background Ingestion Queue (future) ──────────────────────────────
     max_queue_size: int = 1000
     worker_concurrency: int = 2
+
+    # ── System Logging ───────────────────────────────────────────────────
+    system_log_retention_days: int = 30
+    cleanup_system_logs_on_startup: bool = True
+
+    # ── Langfuse Tracing ─────────────────────────────────────────────────
+    langfuse_enabled: bool = False
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str = "http://localhost:3000"
+    langfuse_debug: bool = False
+    langfuse_sample_rate: float = 1.0
+    langfuse_max_payload_chars: int = 4000
 
     # ── File Watcher (future) ────────────────────────────────────────────
     watch_directories: list[str] = []
@@ -117,7 +207,14 @@ class Settings(BaseSettings):
         "env_prefix": "KLIN_",
         "env_file": ".env",
         "env_file_encoding": "utf-8",
+        "extra": "ignore",
     }
+
+    # ── Resolved accessors ─────────────────────────────────────────────
+
+    @property
+    def langfuse_environment(self) -> str:
+        return self.app_environment or ("development" if self.debug else "production")
 
 
 # Singleton – import this everywhere

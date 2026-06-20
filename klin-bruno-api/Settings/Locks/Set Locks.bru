@@ -1,0 +1,26 @@
+meta {
+  name: Set Locks
+  type: http
+  seq: 2
+}
+
+put {
+  url: {{baseUrl}}/api/settings/locks
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "lock_file": [
+      "{{lockFilePath}}"
+    ],
+    "lock_folder": [
+      "{{lockFolderPath}}"
+    ]
+  }
+}

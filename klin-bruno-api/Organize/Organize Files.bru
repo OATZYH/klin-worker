@@ -1,0 +1,26 @@
+meta {
+  name: Organize Files
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/api/organize
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "file_paths": [
+      "/Users/sarun/Work/Senior/klin-worker/klin-test/data/DeepSeek_OCR_paper.pdf",
+  //     "/Users/sarun/Work/Senior/klin-worker/klin-test/data/หลักสูตรการแพทย์แผนจีนบัณฑิตCM67.pdf",
+      "/Users/sarun/Work/Senior/klin-worker/klin-test/data/images.jpg"
+    ],
+    "force":true
+  }
+}

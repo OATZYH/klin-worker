@@ -1,0 +1,25 @@
+meta {
+  name: Create Watcher Folder
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/api/settings/auto-organize/folders
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "folder_path": "{{watcherFolderPath}}",
+    "auto_organize_enabled": true,
+    "frequency_value": 1,
+    "frequency_unit": "day",
+    "recursive": true
+  }
+}

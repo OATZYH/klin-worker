@@ -1,0 +1,24 @@
+meta {
+  name: Update Watcher Folder
+  type: http
+  seq: 5
+}
+
+patch {
+  url: {{baseUrl}}/api/settings/auto-organize/folders/{{watcherId}}
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "auto_organize_enabled": true,
+    "frequency_value": 2,
+    "frequency_unit": "hour",
+    "recursive": true
+  }
+}

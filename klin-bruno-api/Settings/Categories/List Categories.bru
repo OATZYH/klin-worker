@@ -1,0 +1,15 @@
+meta {
+  name: List Categories
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/settings/categories
+  body: none
+  auth: none
+}
+
+params:query {
+  active_only: true
+}

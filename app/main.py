@@ -7,24 +7,55 @@ FastAPI application entry point.
   • CORS enabled for Tauri dev mode
   • Health-check at /health
   • Organize API at /api/organize
-  • Categories CRUD at /api/categories
+  • Summary API at /api/summary
+        • Settings API at /api/settings (categories, base path)
   • History log at /api/history
 """
 
 import logging
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from time import perf_counter
+from typing import Any, AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.api.categories import router as categories_router
 from app.api.history import router as history_router
 from app.api.organize import router as organize_router
+from app.api.search import router as search_router
+from app.api.settings import router as settings_router
+from app.api.settings.store import (
+    SETTING_KEY_ONBOARDING_SEEDED,
+    SETTING_KEY_ONBOARDING_STATUS,
+    get_setting_value,
+    parse_bool_setting,
+)
+from app.api.summary import router as summary_router
 from app.core.config import settings
 from app.db.migrations import run_migrations
-from app.services.rag_service import RagService
+from app.db.session import engine
+from app.observability.tracing import (
+    create_trace_id,
+    flush_langfuse,
+    get_current_trace_id,
+    init_langfuse,
+    propagate_trace_attributes,
+    reset_current_request_trace_id,
+    set_current_request_trace_id,
+    start_as_current_observation,
+    update_current_span,
+)
+from app.services.organize.background_ingest import BackgroundIngestWorker
+from app.services.organize.classification_service import ClassificationService
+from app.services.files.docling_parser import build_docling_parser
+from app.services.ai.llm_client import llm_client
+from app.services.ai.rag_service import RagService
+from app.services.categories.seed_service import generate_missing_embeddings
+from app.services.startup_checks import CheckResult, run_all_checks
+from app.services.system_log_service import SystemLogService
 
 # ── Logging ──────────────────────────────────────────────────────────────
 
@@ -37,6 +68,14 @@ logger = logging.getLogger(__name__)
 # ── Shared service instances ─────────────────────────────────────────────
 
 _rag_service = RagService()
+_system_log_service = SystemLogService()
+fast_docling = build_docling_parser("fast")
+rich_docling = build_docling_parser("rich")
+ingest_worker = BackgroundIngestWorker(
+    fast_parser=fast_docling,
+    rich_parser=rich_docling,
+    max_queue_size=settings.max_queue_size,
+)
 
 
 def get_rag_service() -> RagService:
@@ -44,30 +83,176 @@ def get_rag_service() -> RagService:
     return _rag_service
 
 
+# ── Startup check results (populated in lifespan, read by /health) ───────
+
+_startup_checks: list[CheckResult] = []
+
+
+async def _write_system_log(
+    *,
+    level: str,
+    event_type: str,
+    message: str,
+    context: dict | None = None,
+) -> None:
+    """Persist a lifecycle / operational event without breaking the app."""
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            await _system_log_service.log(
+                db=db,
+                level=level,
+                component="app.lifecycle",
+                event_type=event_type,
+                message=message,
+                context=context,
+            )
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "Failed to persist system log event '%s'.",
+            event_type,
+            exc_info=True,
+        )
+
+
+async def _cleanup_system_logs() -> int:
+    """Delete old system logs based on retention settings."""
+    if not settings.cleanup_system_logs_on_startup:
+        return 0
+
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            deleted_count = await _system_log_service.cleanup_old_logs(
+                db,
+                retention_days=settings.system_log_retention_days,
+            )
+            await db.commit()
+            return deleted_count
+    except Exception:
+        logger.warning("System log cleanup failed.", exc_info=True)
+        return 0
+
+
 # ── Lifespan ─────────────────────────────────────────────────────────────
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Startup / shutdown lifecycle hook."""
-    logger.info("🚀  Starting %s v%s", settings.app_name, settings.app_version)
+    global _startup_checks
 
-    # Ensure data directory exists
+    logger.info("🚀  Starting %s v%s", settings.app_name, settings.app_version)
+    init_langfuse()
+
+    # ── 1. Ensure data directory exists ──────────────────────────────
     Path(settings.database_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Initialise SQLite (create tables)
+    # ── 2. Initialise SQLite (run Alembic migrations) ────────────────
     await run_migrations()
+    cleaned_system_logs = await _cleanup_system_logs()
 
-    # Initialise RAG-Anything (heavy — do it once)
+    # ── 3. Connect to llama-server (out-of-process) ───────────────────
+    try:
+        await llm_client.startup()
+    except Exception:
+        logger.warning(
+            "llama-server connection failed — the API will work without AI features.",
+            exc_info=True,
+        )
+        await _write_system_log(
+            level="WARNING",
+            event_type="llm_startup_failed",
+            message="llama-server connection failed at startup.",
+            context={"component": "llm_client"},
+        )
+
+    # ── 4. Initialise RAG-Anything (heavy — do it once) ──────────────
     try:
         await _rag_service.setup()
     except Exception:
         logger.warning(
-            "RAG-Anything failed to initialise — "
-            "the API will work without semantic features."
+            "RAG-Anything failed to initialise — the API will work without semantic features."
         )
+        await _write_system_log(
+            level="WARNING",
+            event_type="rag_startup_failed",
+            message="RAG service failed to initialize at startup.",
+            context={"component": "rag_service"},
+        )
+
+    # ── 4b. Start background ingest worker ───────────────────────
+    if _rag_service.is_ready:
+        try:
+            await ingest_worker.start(_rag_service)
+        except Exception:
+            logger.warning(
+                "Background ingest worker failed to start.",
+                exc_info=True,
+            )
+            await _write_system_log(
+                level="WARNING",
+                event_type="ingest_worker_start_failed",
+                message="Background ingest worker failed to start.",
+                context={"component": "background_ingest"},
+            )
+
+    # ── 5. Run startup checks (DB, llama-server, RAG) ────────────────
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db:
+            if _rag_service.is_ready and llm_client.supports_embeddings:
+                classifier = ClassificationService(_rag_service)
+                embedded = await generate_missing_embeddings(db, classifier)
+                if embedded > 0:
+                    logger.info(
+                        "Generated %d missing category embeddings at startup.",
+                        embedded,
+                    )
+                    await db.commit()
+            _startup_checks = await run_all_checks(db, _rag_service)
+    except Exception:
+        logger.warning("Startup checks failed to execute.", exc_info=True)
+        await _write_system_log(
+            level="WARNING",
+            event_type="startup_checks_failed",
+            message="Startup checks failed to execute.",
+            context={"component": "startup_checks"},
+        )
+
+    startup_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
+    await _write_system_log(
+        level="INFO" if startup_ok else "WARNING",
+        event_type="app_startup",
+        message="Application startup completed.",
+        context={
+            "version": settings.app_version,
+            "rag_ready": _rag_service.is_ready,
+            "llm_loaded": llm_client.is_ready,
+            "cleaned_system_logs": cleaned_system_logs,
+            "checks": {
+                result.name: {"ok": result.ok, "detail": result.detail}
+                for result in _startup_checks
+            },
+        },
+    )
+
+    # NOTE: Category seeding is done via PUT /api/settings/default-base-path,
+    # which the Tauri frontend calls on launch.
 
     yield  # ← application runs here
 
+    # ── Shutdown ─────────────────────────────────────────────────────
+    await ingest_worker.stop()
+    await llm_client.shutdown()
+    flush_langfuse()
+    await _write_system_log(
+        level="INFO",
+        event_type="app_shutdown",
+        message="Application shutdown completed.",
+        context={
+            "version": settings.app_version,
+            "rag_ready": _rag_service.is_ready,
+        },
+    )
     logger.info("👋  Shutting down %s", settings.app_name)
 
 
@@ -88,18 +273,130 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+def _feature_tag(path: str) -> str:
+    if path.startswith("/api/organize"):
+        return "organize"
+    if path.startswith("/api/summary"):
+        return "summary"
+    if path.startswith("/api/search"):
+        return "search"
+    if path.startswith("/api/history"):
+        return "history"
+    if path.startswith("/api/settings"):
+        return "settings"
+    if path.startswith("/health"):
+        return "health"
+    return "api"
+
+
+def _request_trace_input(method: str, path: str, query_params: dict[str, str], body: bytes | None = None) -> dict[str, Any]:
+    trace_input: dict[str, Any] = {
+        "method": method,
+        "path": path,
+        "query_params": query_params,
+    }
+    if method == "POST" and path == "/api/search/files" and body:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            trace_input["body_parse_error"] = True
+            return trace_input
+
+        if isinstance(payload, dict) and isinstance(payload.get("query"), str):
+            trace_input["body"] = {"query": payload["query"]}
+    return trace_input
+
+
+@app.middleware("http")
+async def langfuse_request_middleware(request: Request, call_next):
+    path = request.url.path
+    if path == "/health":
+        return await call_next(request)
+
+    method = request.method.upper()
+    trace_name = f"{method} {path}"
+    feature = _feature_tag(path)
+    trace_id = create_trace_id(seed=f"{method}:{path}:{perf_counter()}")
+    request_token = set_current_request_trace_id(trace_id)
+    request.state.langfuse_trace_id = trace_id
+    request_body = await request.body() if method == "POST" and path == "/api/search/files" else None
+
+    with start_as_current_observation(
+        name=trace_name,
+        as_type="span",
+        trace_context={"trace_id": trace_id} if trace_id else None,
+        input=_request_trace_input(method, path, dict(request.query_params), request_body),
+        metadata={
+            "feature": feature,
+            "component": "fastapi",
+        },
+    ):
+        with propagate_trace_attributes(
+            metadata={"feature": feature, "method": method, "path": path},
+            version=settings.app_version,
+            tags=[feature],
+            trace_name=trace_name,
+        ):
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                update_current_span(
+                    output={"status": "error"},
+                    metadata={"feature": feature},
+                    level="ERROR",
+                    status_message=str(exc),
+                )
+                reset_current_request_trace_id(request_token)
+                raise
+
+            response.headers["X-Langfuse-Trace-Id"] = get_current_trace_id() or ""
+            update_current_span(
+                output={"status_code": response.status_code},
+                metadata={"feature": feature},
+            )
+            reset_current_request_trace_id(request_token)
+            return response
+
 # Routers
 app.include_router(organize_router)
-app.include_router(categories_router)
+app.include_router(summary_router)
+app.include_router(settings_router)
 app.include_router(history_router)
+app.include_router(search_router)
 
 
 # ── Health check ─────────────────────────────────────────────────────────
 
+
 @app.get("/health")
 async def health() -> dict:
+    checks = {r.name: {"ok": r.ok, "detail": r.detail} for r in _startup_checks}
+    checks["FastAPI"] = {
+        "ok": True,
+        "detail": f"{settings.app_name} v{settings.app_version} is running",
+    }
+    all_ok = all(r.ok for r in _startup_checks) if _startup_checks else False
+
+    async with AsyncSession(engine, expire_on_commit=False) as db:
+        onboarding_status = await get_setting_value(
+            db,
+            SETTING_KEY_ONBOARDING_STATUS,
+            default="pending",
+        )
+        onboarding_seeded = parse_bool_setting(
+            await get_setting_value(
+                db,
+                SETTING_KEY_ONBOARDING_SEEDED,
+                default="false",
+            ),
+            default=False,
+        )
+
     return {
-        "status": "ok",
+        "status": "ok" if all_ok else "degraded",
         "version": settings.app_version,
-        "rag_ready": _rag_service.is_ready,
+        "services": checks,
+        "onboarding_status": onboarding_status or "pending",
+        "onboarding_seeded": onboarding_seeded,
     }

@@ -3,13 +3,15 @@
 > AI File Organizer — local FastAPI backend that analyses files on your machine using semantic AI.  
 > Privacy-first. No file uploads. No cloud dependency. Everything runs locally.
 
+> Current branch runtime: `klin-worker` talks to an external OpenAI-compatible `llama-server` endpoint, usually `http://127.0.0.1:8080/v1`. For app development, you can run `llama-server` from Docker Compose in the app repo and run this worker from source with reload.
+
 ---
 
 ## What is this?
 
 **Klin-Worker** is the backend service for the AI File Organizer desktop app. It receives absolute file paths from a [Tauri](https://tauri.app/) frontend, scans the files locally, ingests them into a semantic engine ([RAG-Anything](https://github.com/RAG-Anything/RAG-Anything)), and returns a structured analysis — without ever moving, renaming, or deleting anything.
 
-Think of it as a **read-only AI advisor** for your file system.
+Think of it as a **read-only AI advisor** for your file system. In this branch, inference is handled by a local [llama.cpp server](https://github.com/ggml-org/llama.cpp) exposed through its OpenAI-compatible HTTP API.
 
 ---
 
@@ -19,10 +21,11 @@ Think of it as a **read-only AI advisor** for your file system.
 |---|---|
 | API framework | [FastAPI](https://fastapi.tiangolo.com/) |
 | Package manager | [uv](https://docs.astral.sh/uv/) |
-| LLM backend | [Ollama](https://ollama.com/) (local) |
+| LLM backend | [llama.cpp server](https://github.com/ggml-org/llama.cpp) (out-of-process, OpenAI-compatible API) |
 | Semantic engine | [RAG-Anything](https://github.com/RAG-Anything/RAG-Anything) → [LightRAG](https://github.com/HKUDS/LightRAG) |
-| LLM model | `gemma3:1b` (default, swappable) |
-| Embedding model | `embeddinggemma:300m` (768-dim) |
+| LLM model | GGUF served by `llama-server` (chat + embeddings, swappable) |
+| Database | SQLite (async via aiosqlite) + [SQLModel](https://sqlmodel.tiangolo.com/) |
+| Migrations | [Alembic](https://alembic.sqlalchemy.org/) |
 | Frontend | Tauri (separate repo) |
 | Python | 3.13+ |
 
@@ -32,23 +35,24 @@ Think of it as a **read-only AI advisor** for your file system.
 
 1. **Python 3.13+**
 2. **[uv](https://docs.astral.sh/uv/getting-started/installation/)** — fast Python package manager
-3. **[Ollama](https://ollama.com/download)** — local LLM runtime
+3. **A GGUF model file** for `llama-server` — for example `Qwen2.5-VL-3B-Instruct-IQ4_XS.gguf` (see below)
 
 ---
 
 ## Quick Start
 
-### 1. Install Ollama models
+### 1. Download the GGUF model
+
+A single model can handle both chat and embeddings. Place it where your chosen runtime can access it:
+
+- app-dev Docker Compose flow: **klin-app/models**
+- packaged sidecar flow: any path referenced by `KLIN_MODEL_PATH`
 
 ```bash
-ollama pull gemma3:1b
-ollama pull embeddinggemma:300m
-```
-
-Verify they're available:
-
-```bash
-ollama list
+mkdir -p models
+// Download the model and save it to klin-app/models/your-model.gguf for Docker Compose dev
+// You can use any GGUF model with chat + embedding capabilities — just update the matching env value
+TBD: Add mirror links for popular models (Gemma, Mistral, Falcon)
 ```
 
 ### 2. Clone & install dependencies
@@ -63,16 +67,23 @@ uv sync
 
 ```bash
 cp .env.example .env
-# Edit .env if you want to change models, host, or thresholds
+# Edit .env if you want to change model path, context size, or thresholds
 ```
 
 ### 4. Start the server
 
 ```bash
-uv run uvicorn app.main:app --reload
+# Development (auto-reload enabled)
+uv run fastapi dev app/main.py
+
+# Production
+uv run fastapi run app/main.py
 ```
 
-The server starts at `http://127.0.0.1:8000`.
+The server starts at `http://127.0.0.1:8000`. On first boot it will:
+- Run database migrations (creates `.storage/klin.db`)
+- Load the GGUF model into memory
+- Wait for `PUT /api/settings/default-base-path` (called by Tauri) to seed default categories with folder paths and embeddings when the database is empty
 
 ### 5. Verify
 
@@ -81,7 +92,16 @@ The server starts at `http://127.0.0.1:8000`.
 curl http://127.0.0.1:8000/health
 
 # Should return:
-# {"status":"ok","version":"0.1.0","rag_ready":true}
+# {
+#   "status":"ok",
+#   "version":"0.2.0",
+#   "services": { "...": { "ok": true, "detail": "..." } },
+#   "onboarding_status":"pending",
+#   "onboarding_seeded":false
+# }
+
+# List auto-seeded categories
+curl http://127.0.0.1:8000/api/settings/categories
 ```
 
 ---
@@ -92,14 +112,53 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 
 | Variable | Default | Description |
 |---|---|---|
-| `KLIN_OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `KLIN_OLLAMA_LLM_MODEL` | `gemma3:1b` | LLM model for reasoning |
-| `KLIN_OLLAMA_EMBED_MODEL` | `embeddinggemma:300m` | Embedding model |
-| `KLIN_OLLAMA_EMBEDDING_DIM` | `768` | Embedding vector dimension |
-| `KLIN_OLLAMA_TIMEOUT` | `300` | Ollama request timeout (seconds) |
+| `KLIN_LLAMA_SERVER_URL` | `http://127.0.0.1:8080/` | OpenAI-compatible `llama-server` base URL |
+| `KLIN_LLAMA_EMBEDDING_SERVER_URL` | `http://127.0.0.1:8081/` | OpenAI-compatible embedding `llama-server` base URL |
+| `KLIN_EMBEDDING_DIM_SIZE` | `1024` | Embedding vector dimension expected from the served model |
+| `KLIN_LLAMA_MAX_CONCURRENT_REQUESTS` | `1` | Max total concurrent HTTP requests sent to llama-server across chat, vision, and embeddings |
+| `KLIN_LLM_INPUT_MAX_CHARS` | `24000` | Coarse character guard applied to text prompt content before llama-server requests |
+| `KLIN_LLM_OUTPUT_MAX_TOKENS` | `4096` | Default output token budget when a caller does not pass `max_tokens` |
+| `KLIN_RAG_CHUNK_TOKEN_SIZE` | `4096` | Token limit per embedding input; must stay below llama-server `-ub` (physical batch size) |
+| `KLIN_SUMMARY_RETRIEVAL_TOP_K` | `2` | Retrieval breadth used by the summary pipeline |
+| `KLIN_SUMMARY_OUTPUT_MAX_TOKENS` | `2048` | Max output tokens for per-file summary generation |
+| `KLIN_RENAME_OUTPUT_MAX_TOKENS` | `48` | Max output tokens for rename suggestion generation |
+| `KLIN_RAG_OUTPUT_MAX_TOKENS` | `256` | Default output token budget for internal RAG generation |
 | `KLIN_DEBUG` | `false` | Enable debug logging |
-| `KLIN_RAG_WORKING_DIR` | `~/.klin/rag_storage` | RAG-Anything storage path |
+| `KLIN_RAG_WORKING_DIR` | `.storage/rag_storage` in source-run dev | RAG-Anything storage path |
+| `KLIN_DATABASE_PATH` | `.storage/klin.db` in source-run dev | SQLite database path |
 | `KLIN_SIMILARITY_THRESHOLD` | `0.85` | Duplicate detection threshold |
+
+---
+
+## CI and Releases
+
+This repository uses GitHub Actions for CI and version-tagged sidecar releases.
+
+- CI workflow: `.github/workflows/ci.yml`
+    - Runs on push and PR to `main`/`dev`
+    - Checks version sync (`pyproject.toml` vs `VERSION`)
+    - Runs Ruff syntax checks and non-LLM tests
+
+- Release workflow: `.github/workflows/release-sidecar.yml`
+    - Runs only when a semantic tag is pushed: `vX.Y.Z`
+    - Validates tag/version consistency before build
+    - Builds sidecar binaries for:
+        - macOS Apple Silicon (`aarch64-apple-darwin`)
+        - macOS Intel (`x86_64-apple-darwin`)
+        - Windows x64 (`x86_64-pc-windows-msvc`)
+        - Linux x64 (`x86_64-unknown-linux-gnu`)
+    - Publishes binaries and checksums as GitHub Release assets
+
+Release steps:
+
+1. Update `pyproject.toml` version and `VERSION` to the same value.
+2. Commit changes.
+3. Create and push a tag in the same version.
+
+```bash
+git tag v0.2.1
+git push origin v0.2.1
+```
 
 ---
 
@@ -107,23 +166,47 @@ All variables are prefixed with `KLIN_`. See `.env.example` for the full list.
 
 ```
 klin-worker/
-├── main.py                         # Convenience launcher
-├── pyproject.toml                   # uv dependencies
-├── .env.example                     # Environment template
+├── main.py                              # Convenience launcher
+├── pyproject.toml                       # uv dependencies
+├── alembic.ini                          # Alembic migration config
+├── .env.example                         # Environment template
+├── models/                              # GGUF model files (git-ignored)
+│   └── gemma-3-1b-it-Q4_K_M.gguf
 ├── app/
-│   ├── main.py                      # FastAPI app, CORS, lifespan
+│   ├── main.py                          # FastAPI app, CORS, lifespan
 │   ├── api/
-│   │   └── organize.py              # POST /api/organize
+│   │   ├── organize.py                  # POST /api/organize
+│   │   ├── settings/                    # Settings sub-routers
+│   │   │   ├── __init__.py              # Combines routers under /api/settings
+│   │   │   ├── categories.py            # CRUD /api/settings/categories
+│   │   │   ├── base_path.py             # GET/PUT /api/settings/default-base-path
+│   │   └── history.py                   # GET /api/history
 │   ├── services/
-│   │   ├── scanner_service.py       # File validation + metadata
-│   │   └── rag_service.py           # RAG-Anything + Ollama wrapper
+│   │   ├── llm_client.py               # llama-cpp-python singleton wrapper
+│   │   ├── rag_service.py              # RAG-Anything + LightRAG wrapper
+│   │   ├── scanner_service.py          # File validation + metadata
+│   │   ├── classification_service.py   # Cosine-similarity scoring
+│   │   ├── summary_service.py          # AI file summaries
+│   │   ├── rename_service.py           # AI filename suggestions
+│   │   ├── seed_service.py             # Default category seeding
+│   │   ├── startup_checks.py           # Health checks at boot
+│   │   └── history_service.py          # Audit log
 │   ├── models/
-│   │   ├── request.py               # Request schemas
-│   │   └── response.py              # Response schemas
+│   │   ├── request.py                   # Request schemas
+│   │   └── response.py                 # Response schemas
+│   ├── db/
+│   │   ├── models.py                    # SQLModel ORM (5 tables)
+│   │   ├── session.py                   # Async engine + get_db
+│   │   └── migrations.py               # Alembic runner
 │   └── core/
-│       └── config.py                # Centralized settings
+│       └── config.py                    # Centralized settings
+├── alembic/
+│   └── versions/                        # DB migration scripts
+├── docs/
+│   ├── ONBOARDING.md                    # Developer onboarding index
+│   └── onboarding/                      # Step-by-step guide (7 parts)
 └── ai/
-    └── init.md                      # Initial design document
+    └── init.md                          # Initial design document
 ```
 
 ---

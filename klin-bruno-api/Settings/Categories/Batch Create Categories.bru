@@ -1,0 +1,36 @@
+meta {
+  name: Batch Create Categories
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/api/settings/categories/batch
+  body: json
+  auth: none
+}
+
+headers {
+  Content-Type: application/json
+}
+
+body:json {
+  {
+    "categories": [
+      {
+        "name": "Finance",
+        "description": "Bills and receipts",
+        "enabled": true,
+        "folder_path": "/Users/sarun/Documents/KlinFiles/Finance",
+        "color": "#10b981"
+      },
+      {
+        "name": "Work",
+        "description": "Project files",
+        "enabled": true,
+        "folder_path": "/Users/sarun/Documents/KlinFiles/Work",
+        "color": "#6366f1"
+      }
+    ]
+  }
+}

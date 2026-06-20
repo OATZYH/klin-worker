@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "langfuse": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "langfuse-mcp"
+      ],
+      "env": {
+        "LANGFUSE_PUBLIC_KEY": "pk-lf-b1f2a018-5e60-4653-8671-7c201a006550",
+        "LANGFUSE_SECRET_KEY": "sk-lf-6dee8e6b-e007-4f55-9607-ee458c7a4b51",
+        "LANGFUSE_HOST": "http://localhost:3000"
+      }
+    }
+  }
+}

@@ -13,13 +13,19 @@ wheels/
 .DS_Store
 
 # AI
-ai/
-.agent/
-.agents/
-.claude/
+prompts/
 
 # env
 .env
 
 # Local dev storage (SQLite + RAG)
 .storage/
+
+# Tests
+klin-test/
+output/
+
+# Logs
+logs/
+
+.cogito-folder.json
